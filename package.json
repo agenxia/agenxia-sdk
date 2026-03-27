@@ -1,0 +1,31 @@
+{
+  "name": "@agenxia/sdk",
+  "version": "1.0.0",
+  "description": "Agenxia Agent SDK \u2014 declarative agent runtime",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "agenxia-agent": "dist/bin/agenxia-agent.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "fastify": "^5.0.0",
+    "@fastify/static": "^8.0.0",
+    "@fastify/cors": "^10.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./client": "./dist/a2a/client.js",
+    "./server": "./dist/server.js",
+    "./llm": "./dist/llm.js"
+  }
+}
