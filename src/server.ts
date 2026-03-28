@@ -106,7 +106,7 @@ export async function createAgentServer(options: ServerOptions = {}): Promise<vo
 
   // GET /docs
   app.get("/docs", async (_req, reply) => {
-    const html = generateDocs(card, deployUrl);
+    const html = generateDocs(card as any, deployUrl);
     reply.type("text/html").send(html);
   });
 
