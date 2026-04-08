@@ -1,0 +1,285 @@
+// Local workflow engine — executes workflow.json autonomously.
+//
+// Agents embed this engine to run their own workflow without the platform.
+// Modules are loaded from ./modules/<moduleId>/execute.js (CommonJS).
+// A module without execute.js is treated as passthrough.
+import { readFileSync, existsSync } from "node:fs";
+import { resolve, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+function buildGraph(nodes, edges) {
+    const nodeMap = new Map();
+    const adjacency = new Map();
+    const reverseAdj = new Map();
+    for (const node of nodes) {
+        nodeMap.set(node.id, node);
+        adjacency.set(node.id, []);
+        reverseAdj.set(node.id, []);
+    }
+    for (const edge of edges) {
+        adjacency.get(edge.source)?.push({
+            target: edge.target,
+            sourceHandle: edge.sourceHandle ?? null,
+            targetHandle: edge.targetHandle ?? null,
+        });
+        reverseAdj.get(edge.target)?.push({
+            source: edge.source,
+            sourceHandle: edge.sourceHandle ?? null,
+            targetHandle: edge.targetHandle ?? null,
+        });
+    }
+    return { nodeMap, adjacency, reverseAdj };
+}
+/** BFS: is targetId reachable from sourceId in adjacency? Detects back-edges. */
+function isReachable(sourceId, targetId, adjacency) {
+    const visited = new Set();
+    const queue = [sourceId];
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (current === targetId)
+            return true;
+        if (visited.has(current))
+            continue;
+        visited.add(current);
+        for (const { target } of adjacency.get(current) ?? []) {
+            if (!visited.has(target))
+                queue.push(target);
+        }
+    }
+    return false;
+}
+/** Merge inputs from upstream node outputs. */
+function resolveInputs(nodeId, reverseAdj, outputs, executed) {
+    const incoming = reverseAdj.get(nodeId) ?? [];
+    // Only consider incoming edges from executed nodes (cycles: back-edges ignored)
+    const activeEdges = incoming.filter((e) => executed.has(e.source));
+    if (activeEdges.length === 0)
+        return {};
+    if (activeEdges.length === 1) {
+        const out = outputs.get(activeEdges[0].source);
+        return out && typeof out === "object"
+            ? out
+            : {};
+    }
+    const merged = {};
+    for (const edge of activeEdges) {
+        const src = outputs.get(edge.source);
+        if (src && typeof src === "object") {
+            Object.assign(merged, src);
+        }
+    }
+    return merged;
+}
+// ---------------------------------------------------------------------------
+// Module loader
+// ---------------------------------------------------------------------------
+async function loadModule(modulesDir, moduleId) {
+    const execPath = join(modulesDir, moduleId, "execute.js");
+    if (!existsSync(execPath)) {
+        // Passthrough
+        return async (inputs) => inputs;
+    }
+    try {
+        const mod = (await import(pathToFileURL(execPath).href));
+        // CommonJS via ESM interop: default export is module.exports
+        const fn = typeof mod.default === "function"
+            ? mod.default
+            : mod;
+        if (typeof fn !== "function") {
+            return async (inputs) => inputs;
+        }
+        return fn;
+    }
+    catch (err) {
+        console.warn(`[workflow] failed to load module ${moduleId}:`, err);
+        return async (inputs) => inputs;
+    }
+}
+// ---------------------------------------------------------------------------
+// Engine
+// ---------------------------------------------------------------------------
+export class WorkflowEngine {
+    workflow;
+    modulesDir;
+    manifest;
+    llm;
+    moduleCache = new Map();
+    history = [];
+    constructor(workflow, options) {
+        this.workflow = workflow;
+        this.modulesDir = options.modulesDir;
+        this.manifest = options.manifest;
+        this.llm = options.llm;
+    }
+    getHistory() {
+        return [...this.history];
+    }
+    async run(message) {
+        this.history.push({ role: "user", content: message });
+        const { nodes, edges, entrypoint } = this.workflow;
+        const graph = buildGraph(nodes, edges);
+        const { nodeMap, adjacency, reverseAdj } = graph;
+        const outputs = new Map();
+        const executed = new Set();
+        // Determine roots: nodes without incoming edges.
+        const roots = [];
+        for (const [nodeId] of nodeMap) {
+            if ((reverseAdj.get(nodeId) ?? []).length === 0)
+                roots.push(nodeId);
+        }
+        // If no roots (cyclic) and entrypoint provided, use it.
+        if (roots.length === 0 && entrypoint && nodeMap.has(entrypoint)) {
+            roots.push(entrypoint);
+        }
+        // Entrypoint node gets the message as passthrough input.
+        const entryIds = new Set(entrypoint && nodeMap.has(entrypoint) ? [entrypoint] : roots);
+        let readyQueue = roots.length > 0 ? [...roots] : entrypoint ? [entrypoint] : [];
+        if (readyQueue.length === 0) {
+            throw new Error("Workflow has no executable entry node");
+        }
+        while (readyQueue.length > 0) {
+            const batch = readyQueue;
+            const batchResults = await Promise.all(batch.map(async (nodeId) => {
+                const node = nodeMap.get(nodeId);
+                if (!node || executed.has(nodeId))
+                    return { nodeId, output: null, skip: true };
+                let inputs = resolveInputs(nodeId, reverseAdj, outputs, executed);
+                // Entrypoint / roots receive the message
+                if (entryIds.has(nodeId) && Object.keys(inputs).length === 0) {
+                    inputs = { message };
+                }
+                const output = await this.executeNode(node, inputs);
+                return { nodeId, output, skip: false };
+            }));
+            for (const r of batchResults) {
+                if (r.skip)
+                    continue;
+                outputs.set(r.nodeId, r.output);
+                executed.add(r.nodeId);
+            }
+            // Next ready nodes
+            const nextReady = [];
+            for (const [nodeId] of nodeMap) {
+                if (executed.has(nodeId))
+                    continue;
+                const incoming = reverseAdj.get(nodeId) ?? [];
+                if (incoming.length === 0)
+                    continue;
+                const allResolved = incoming.every((e) => {
+                    if (executed.has(e.source))
+                        return true;
+                    // Back-edge: target is reachable from source -> we are upstream of source
+                    return isReachable(nodeId, e.source, adjacency);
+                });
+                const hasAnyExecutedPred = incoming.some((e) => executed.has(e.source));
+                if (allResolved && hasAnyExecutedPred)
+                    nextReady.push(nodeId);
+            }
+            readyQueue = nextReady;
+        }
+        // Extract response: prefer a node with no outgoing edges (sink) that has a content/message field.
+        const content = this.extractContent(outputs, adjacency);
+        this.history.push({ role: "assistant", content });
+        return { content, messages: [...this.history] };
+    }
+    async executeNode(node, inputs) {
+        const moduleId = node.data?.moduleId;
+        if (!moduleId) {
+            // Passthrough
+            return inputs;
+        }
+        let fn = this.moduleCache.get(moduleId);
+        if (!fn) {
+            fn = await loadModule(this.modulesDir, moduleId);
+            this.moduleCache.set(moduleId, fn);
+        }
+        const params = node.data?.config ?? {};
+        const context = {
+            manifest: this.manifest,
+            llm: this.llm,
+            nodeId: node.id,
+            history: [...this.history],
+        };
+        try {
+            const result = await fn(inputs, params, context);
+            if (result && typeof result === "object")
+                return result;
+            return { value: result };
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`[module:${moduleId}] ${msg}`);
+        }
+    }
+    extractContent(outputs, adjacency) {
+        // Prefer sink nodes (no outgoing edges)
+        const sinks = [];
+        for (const [nodeId, edges] of adjacency) {
+            if (edges.length === 0 && outputs.has(nodeId))
+                sinks.push(nodeId);
+        }
+        const candidates = sinks.length > 0 ? sinks : Array.from(outputs.keys());
+        // Walk candidates looking for a string-like content field
+        for (const id of candidates) {
+            const out = outputs.get(id);
+            if (!out || typeof out !== "object")
+                continue;
+            const obj = out;
+            if (typeof obj.response === "string")
+                return obj.response;
+            if (typeof obj.content === "string")
+                return obj.content;
+            if (typeof obj.message === "string")
+                return obj.message;
+            if (typeof obj.text === "string")
+                return obj.text;
+        }
+        // Last resort: stringify last executed output
+        const lastKey = candidates[candidates.length - 1];
+        const last = lastKey ? outputs.get(lastKey) : undefined;
+        if (typeof last === "string")
+            return last;
+        return last ? JSON.stringify(last) : "";
+    }
+}
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+export function loadWorkflowDefinition(workflowPath) {
+    if (!existsSync(workflowPath))
+        return null;
+    try {
+        const raw = readFileSync(workflowPath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (!parsed.nodes || !Array.isArray(parsed.nodes))
+            return null;
+        return {
+            entrypoint: parsed.entrypoint,
+            nodes: parsed.nodes,
+            edges: parsed.edges ?? [],
+        };
+    }
+    catch (err) {
+        console.warn(`[workflow] failed to parse ${workflowPath}:`, err);
+        return null;
+    }
+}
+export function createWorkflowEngine(options) {
+    const def = loadWorkflowDefinition(options.workflowPath);
+    if (!def)
+        return null;
+    const modulesDir = resolve(options.modulesDir);
+    return new WorkflowEngine(def, {
+        modulesDir,
+        manifest: options.manifest,
+        llm: options.llm,
+    });
+}
+// Helper to resolve default paths relative to a manifest directory
+export function defaultWorkflowPaths(manifestPath) {
+    const dir = dirname(resolve(manifestPath));
+    return {
+        workflowPath: join(dir, "workflow.json"),
+        modulesDir: join(dir, "modules"),
+    };
+}
+//# sourceMappingURL=workflow-engine.js.map
