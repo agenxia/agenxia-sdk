@@ -482,6 +482,278 @@ test("triggerFromNode emits events only for re-executed descendants", async () =
   h.cleanup();
 });
 
+// =============================================================================
+// Port routing tests (sourceHandle / targetHandle)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// P1. Simple routing: A.out1 → B.in1. B receives only { in1: 42 }, not the
+//     whole A output.
+// -----------------------------------------------------------------------------
+test("port routing: single edge forwards only the named field under the target name", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ out1: 42, ignored: 99 });`,
+    B: `module.exports = async (i) => ({ response: JSON.stringify(i) });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+      ],
+      edges: [
+        { source: "A", sourceHandle: "out1", target: "B", targetHandle: "in1" },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "p1" } },
+  );
+
+  const r = await engine.run("go");
+  assert.equal(r.content, '{"in1":42}');
+
+  h.cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// P2. Multi-edge: A.x → C.foo and B.y → C.bar. C receives { foo: 1, bar: 2 }.
+// -----------------------------------------------------------------------------
+test("port routing: multiple edges merge under their respective targetHandles", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ x: 1, noise: "A-noise" });`,
+    B: `module.exports = async () => ({ y: 2, noise: "B-noise" });`,
+    C: `module.exports = async (i) => ({ response: JSON.stringify(i) });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+        { id: "C", data: { moduleId: "C" } },
+      ],
+      edges: [
+        { source: "A", sourceHandle: "x", target: "C", targetHandle: "foo" },
+        { source: "B", sourceHandle: "y", target: "C", targetHandle: "bar" },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "p2" } },
+  );
+
+  const r = await engine.run("go");
+  const parsed = JSON.parse(r.content) as Record<string, unknown>;
+  assert.deepEqual(parsed, { foo: 1, bar: 2 });
+
+  h.cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// P3. Conflict on targetHandle: two edges write the same key. Last wins.
+// -----------------------------------------------------------------------------
+test("port routing: conflicting targetHandle — last edge wins", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ v: "from-A" });`,
+    B: `module.exports = async () => ({ v: "from-B" });`,
+    C: `module.exports = async (i) => ({ response: i.value });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+        { id: "C", data: { moduleId: "C" } },
+      ],
+      // Both edges write to C.value; B is listed second → should win.
+      edges: [
+        { source: "A", sourceHandle: "v", target: "C", targetHandle: "value" },
+        { source: "B", sourceHandle: "v", target: "C", targetHandle: "value" },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "p3" } },
+  );
+
+  const r = await engine.run("go");
+  // Order of edges in the edges array determines the winner, regardless
+  // of execution order (A and B run in parallel batch 1).
+  assert.equal(r.content, "from-B");
+
+  h.cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// P4. Source handle missing on upstream output: target key present with
+//     undefined value. Must not throw.
+// -----------------------------------------------------------------------------
+test("port routing: missing sourceHandle key exposes target key with undefined", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ x: 1 });`,
+    B: `module.exports = async (i) => ({
+      response: "has_y=" + ("y" in i) + " val=" + String(i.y),
+    });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+      ],
+      edges: [
+        // Wired to a missing source field.
+        {
+          source: "A",
+          sourceHandle: "missing",
+          target: "B",
+          targetHandle: "y",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "p4" } },
+  );
+
+  const r = await engine.run("go");
+  // Key "y" is present (wired) but value is undefined.
+  assert.equal(r.content, "has_y=true val=undefined");
+
+  h.cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// P5. Legacy fallback: edge without handles keeps the old merge behavior.
+// -----------------------------------------------------------------------------
+test("port routing: edges without handles fall back to full output merge", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ a: 1, b: 2 });`,
+    B: `module.exports = async (i) => ({ response: JSON.stringify(i) });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+      ],
+      // No sourceHandle, no targetHandle — legacy shape.
+      edges: [{ source: "A", target: "B" }],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "p5" } },
+  );
+
+  const r = await engine.run("go");
+  const parsed = JSON.parse(r.content) as Record<string, unknown>;
+  assert.deepEqual(parsed, { a: 1, b: 2 });
+
+  h.cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// P6. Reactive widget scenario — the motivating bug.
+//     connector-ics.events → widget.events
+//     widget.selection → output."output-in"
+//     After triggerFromNode(widget, {selection: {date: "2026-04-09"}}),
+//     output.inputs must contain only { "output-in": {date: ...} }, NOT
+//     {events: [...], selection: {...}}.
+// -----------------------------------------------------------------------------
+test("port routing: reactive widget forwards only selection, not events", async () => {
+  const h = makeHarness({
+    connector: `module.exports = async () => ({
+      events: [{ id: 1 }, { id: 2 }],
+    });`,
+    // Widget is a passthrough: it forwards whatever it received.
+    widget: `module.exports = async (i) => i;`,
+    // Output node echoes its inputs as JSON.
+    outnode: `module.exports = async (i) => ({ response: JSON.stringify(i) });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "connector",
+      nodes: [
+        { id: "connector", data: { moduleId: "connector" } },
+        { id: "widget", data: { moduleId: "widget" } },
+        { id: "out", data: { moduleId: "outnode" } },
+      ],
+      edges: [
+        {
+          source: "connector",
+          sourceHandle: "events",
+          target: "widget",
+          targetHandle: "events",
+        },
+        {
+          source: "widget",
+          sourceHandle: "selection",
+          target: "out",
+          targetHandle: "output-in",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "p6" } },
+  );
+
+  // Initial run: no selection yet, so output sees { "output-in": undefined }.
+  await engine.run("init");
+
+  // User interaction: widget emits a selection.
+  const r = await engine.triggerFromNode("widget", {
+    selection: { date: "2026-04-09", kind: "event" },
+  });
+
+  const parsed = JSON.parse(r.content) as Record<string, unknown>;
+  assert.deepEqual(parsed, {
+    "output-in": { date: "2026-04-09", kind: "event" },
+  });
+  // Crucially, no leak of the events array.
+  assert.ok(
+    !("events" in parsed),
+    "output must not see the events array from the connector",
+  );
+
+  h.cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// P7. Mixed edges: one with handles, one without. The handled edge routes by
+//     port, the unhandled edge bulk-merges.
+// -----------------------------------------------------------------------------
+test("port routing: mix of handled and unhandled edges on the same target", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ x: "A.x", ignored: "A.ignored" });`,
+    B: `module.exports = async () => ({ raw: "B.raw", extra: "B.extra" });`,
+    C: `module.exports = async (i) => ({ response: JSON.stringify(i) });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+        { id: "C", data: { moduleId: "C" } },
+      ],
+      edges: [
+        // Handled: A.x → C.foo
+        { source: "A", sourceHandle: "x", target: "C", targetHandle: "foo" },
+        // Unhandled: B → C (legacy merge of entire B output)
+        { source: "B", target: "C" },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "p7" } },
+  );
+
+  const r = await engine.run("go");
+  const parsed = JSON.parse(r.content) as Record<string, unknown>;
+  // foo from A.x (routed), raw + extra from B (merged), A.ignored absent.
+  assert.deepEqual(parsed, { foo: "A.x", raw: "B.raw", extra: "B.extra" });
+  assert.ok(!("ignored" in parsed), "A.ignored must not leak through");
+  assert.ok(!("x" in parsed), "A.x must not appear under its source name");
+
+  h.cleanup();
+});
+
 test("upstream module is called exactly once across 10 widget triggers", async () => {
   const h = makeHarness({
     Fetch: `module.exports = async () => {

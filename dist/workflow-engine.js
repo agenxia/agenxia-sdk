@@ -65,27 +65,47 @@ function isReachable(sourceId, targetId, adjacency) {
     }
     return false;
 }
-/** Merge inputs from upstream node outputs. */
+/**
+ * Build the inputs object for a node by routing data from upstream
+ * executed predecessors according to their edges' port handles.
+ *
+ * Rules:
+ * - Edge with BOTH sourceHandle and targetHandle: forwards only the
+ *   `source.outputs[sourceHandle]` value, exposed on the target side
+ *   under the key `targetHandle`. Missing source key yields the key
+ *   with value `undefined` (present, not omitted).
+ * - Edge without handles (legacy): merges the entire source output
+ *   into the result via Object.assign. Preserves backwards
+ *   compatibility for workflows generated before port routing.
+ * - Multiple edges targeting the same `targetHandle`: last writer wins.
+ * - Back-edges (source not yet executed) are skipped upstream by the
+ *   filter on `executed`.
+ */
 function resolveInputs(nodeId, reverseAdj, outputs, executed) {
     const incoming = reverseAdj.get(nodeId) ?? [];
-    // Only consider incoming edges from executed nodes (cycles: back-edges ignored)
     const activeEdges = incoming.filter((e) => executed.has(e.source));
-    if (activeEdges.length === 0)
-        return {};
-    if (activeEdges.length === 1) {
-        const out = outputs.get(activeEdges[0].source);
-        return out && typeof out === "object"
-            ? out
-            : {};
-    }
-    const merged = {};
+    const result = {};
     for (const edge of activeEdges) {
         const src = outputs.get(edge.source);
-        if (src && typeof src === "object") {
-            Object.assign(merged, src);
+        if (!src || typeof src !== "object")
+            continue;
+        const srcObj = src;
+        const hasHandles = typeof edge.sourceHandle === "string" &&
+            edge.sourceHandle.length > 0 &&
+            typeof edge.targetHandle === "string" &&
+            edge.targetHandle.length > 0;
+        if (hasHandles) {
+            // Port routing: forward only the named field, under the declared
+            // target name. Missing source key is exposed as `undefined` so
+            // modules can detect "wired but no value" distinctly from "not wired".
+            result[edge.targetHandle] = srcObj[edge.sourceHandle];
+        }
+        else {
+            // Legacy fallback: merge the whole output.
+            Object.assign(result, srcObj);
         }
     }
-    return merged;
+    return result;
 }
 // ---------------------------------------------------------------------------
 // Module loader

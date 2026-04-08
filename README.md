@@ -135,6 +135,59 @@ await engine.run("Bonjour", {
 });
 ```
 
+## Port routing
+
+Edges in `workflow.json` can declare `sourceHandle` and `targetHandle`.
+When both are set, only the named field is forwarded, exposed under the
+target's declared name:
+
+```json
+{
+  "source": "connector-ics",
+  "sourceHandle": "events",
+  "target": "widget-calendar",
+  "targetHandle": "events"
+}
+```
+
+This means:
+
+```js
+// inside widget-calendar's execute.js
+module.exports = async function (inputs) {
+  // inputs === { events: [...] }
+  // NOT { events: [...], someOtherConnectorKey: "..." }
+};
+```
+
+**Visual semantics:**
+
+```
+┌──────────────┐  events  ┌────────────────┐  selection  ┌────────┐
+│ connector-ics├──────────▶ widget-calendar├─────────────▶ output │
+└──────────────┘          └────────────────┘             └────────┘
+                                          ^^^ only `selection`
+                                          is forwarded to output,
+                                          under the target name
+                                          `output-in`.
+```
+
+After a `widget_trigger` that merges `{selection: {date:...}}` into the
+widget's cached output, the `output` node receives exactly
+`{ "output-in": { date: ... } }` — the `events` array from the connector
+stays confined to the widget and does not leak downstream.
+
+**Edge without handles** (legacy shape `{source, target}`): the entire
+upstream output is merged into the target inputs, as before. This keeps
+old workflows working without migration.
+
+**Conflict rule:** if two edges target the same `targetHandle`, the edge
+listed last in `workflow.json` wins, regardless of execution order.
+
+**Missing source field:** if `source.output[sourceHandle]` is `undefined`,
+the target key is still present in `inputs` with value `undefined`.
+Modules can distinguish "wired but empty" from "not wired at all".
+
 ## Modules
 
 Module executors live in `modules/<moduleId>/execute.js` and use CommonJS:
