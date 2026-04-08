@@ -120,6 +120,7 @@ export class WorkflowEngine {
         const { nodeMap, adjacency, reverseAdj } = graph;
         const outputs = new Map();
         const executed = new Set();
+        const executionOrder = [];
         // Determine roots: nodes without incoming edges.
         const roots = [];
         for (const [nodeId] of nodeMap) {
@@ -155,6 +156,7 @@ export class WorkflowEngine {
                     continue;
                 outputs.set(r.nodeId, r.output);
                 executed.add(r.nodeId);
+                executionOrder.push(r.nodeId);
             }
             // Next ready nodes
             const nextReady = [];
@@ -176,15 +178,18 @@ export class WorkflowEngine {
             }
             readyQueue = nextReady;
         }
-        // Extract response: prefer a node with no outgoing edges (sink) that has a content/message field.
-        const content = this.extractContent(outputs, adjacency);
+        // Extract response: prefer `response` field from any executed node
+        // (LLM modules emit it), then fall back to sinks.
+        const content = this.extractContent(outputs, adjacency, executionOrder);
+        console.log(`[workflow] run complete — executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
         this.history.push({ role: "assistant", content });
         return { content, messages: [...this.history] };
     }
     async executeNode(node, inputs) {
         const moduleId = node.data?.moduleId;
+        const inputKeys = Object.keys(inputs).join(",") || "(none)";
         if (!moduleId) {
-            // Passthrough
+            console.log(`[workflow] exec ${node.id} (passthrough) inputs={${inputKeys}}`);
             return inputs;
         }
         let fn = this.moduleCache.get(moduleId);
@@ -199,42 +204,59 @@ export class WorkflowEngine {
             nodeId: node.id,
             history: [...this.history],
         };
+        console.log(`[workflow] exec ${node.id} (module=${moduleId}) inputs={${inputKeys}} hasLLM=${!!this.llm}`);
         try {
             const result = await fn(inputs, params, context);
-            if (result && typeof result === "object")
-                return result;
-            return { value: result };
+            const out = result && typeof result === "object"
+                ? result
+                : { value: result };
+            const outKeys = Object.keys(out).join(",") || "(none)";
+            console.log(`[workflow] exec ${node.id} → output={${outKeys}}`);
+            return out;
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[workflow] exec ${node.id} ERROR:`, msg);
             throw new Error(`[module:${moduleId}] ${msg}`);
         }
     }
-    extractContent(outputs, adjacency) {
-        // Prefer sink nodes (no outgoing edges)
+    extractContent(outputs, adjacency, executionOrder) {
+        const getField = (out, key) => {
+            if (!out || typeof out !== "object")
+                return null;
+            const v = out[key];
+            return typeof v === "string" && v !== "" ? v : null;
+        };
+        // Priority 1: `response` from any executed node (LLM modules emit
+        // this — agent-core, etc.). Walk in reverse execution order so the
+        // most recent LLM response wins in cyclic workflows.
+        for (let i = executionOrder.length - 1; i >= 0; i--) {
+            const id = executionOrder[i];
+            const v = getField(outputs.get(id), "response");
+            if (v)
+                return v;
+        }
+        // Priority 2: `content` field anywhere (newest first).
+        for (let i = executionOrder.length - 1; i >= 0; i--) {
+            const id = executionOrder[i];
+            const v = getField(outputs.get(id), "content");
+            if (v)
+                return v;
+        }
+        // Priority 3: sink nodes (no outgoing edges) with message/text.
         const sinks = [];
         for (const [nodeId, edges] of adjacency) {
             if (edges.length === 0 && outputs.has(nodeId))
                 sinks.push(nodeId);
         }
-        const candidates = sinks.length > 0 ? sinks : Array.from(outputs.keys());
-        // Walk candidates looking for a string-like content field
-        for (const id of candidates) {
+        for (const id of sinks) {
             const out = outputs.get(id);
-            if (!out || typeof out !== "object")
-                continue;
-            const obj = out;
-            if (typeof obj.response === "string")
-                return obj.response;
-            if (typeof obj.content === "string")
-                return obj.content;
-            if (typeof obj.message === "string")
-                return obj.message;
-            if (typeof obj.text === "string")
-                return obj.text;
+            const m = getField(out, "message") ?? getField(out, "text");
+            if (m)
+                return m;
         }
-        // Last resort: stringify last executed output
-        const lastKey = candidates[candidates.length - 1];
+        // Last resort: last executed output, stringified.
+        const lastKey = executionOrder[executionOrder.length - 1];
         const last = lastKey ? outputs.get(lastKey) : undefined;
         if (typeof last === "string")
             return last;
