@@ -44,6 +44,37 @@ export interface WorkflowRunResult {
     messages: ChatHistoryMessage[];
     nodeOutputs: Record<string, unknown>;
 }
+export type WorkflowEvent = {
+    type: "node_start";
+    nodeId: string;
+    label?: string;
+    moduleId?: string;
+} | {
+    type: "node_complete";
+    nodeId: string;
+    output: unknown;
+    durationMs: number;
+} | {
+    type: "node_error";
+    nodeId: string;
+    error: string;
+    durationMs: number;
+} | {
+    type: "edge_active";
+    source: string;
+    target: string;
+    sourceHandle?: string | null;
+    targetHandle?: string | null;
+} | {
+    type: "workflow_complete";
+    content: string;
+    messages: ChatHistoryMessage[];
+    nodeOutputs: Record<string, unknown>;
+};
+export type WorkflowEventHandler = (event: WorkflowEvent) => void;
+export interface WorkflowRunOptions {
+    onEvent?: WorkflowEventHandler;
+}
 export declare class WorkflowEngine {
     private readonly workflow;
     private readonly modulesDir;
@@ -57,7 +88,7 @@ export declare class WorkflowEngine {
         llm?: ReturnType<typeof createLLM>;
     });
     getHistory(): ChatHistoryMessage[];
-    run(message: string): Promise<WorkflowRunResult>;
+    run(message: string, options?: WorkflowRunOptions): Promise<WorkflowRunResult>;
     private executeNode;
     private extractContent;
 }

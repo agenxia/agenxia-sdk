@@ -136,7 +136,18 @@ export class WorkflowEngine {
     getHistory() {
         return [...this.history];
     }
-    async run(message) {
+    async run(message, options = {}) {
+        const onEvent = options.onEvent;
+        const emit = (e) => {
+            if (onEvent) {
+                try {
+                    onEvent(e);
+                }
+                catch (err) {
+                    console.warn("[workflow] onEvent threw:", err);
+                }
+            }
+        };
         this.history.push({ role: "user", content: message });
         const { nodes, edges, entrypoint } = this.workflow;
         const graph = buildGraph(nodes, edges);
@@ -171,8 +182,28 @@ export class WorkflowEngine {
                 if (entryIds.has(nodeId) && Object.keys(inputs).length === 0) {
                     inputs = { message };
                 }
-                const output = await this.executeNode(node, inputs);
-                return { nodeId, output, skip: false };
+                // Emit node_start right before execution
+                emit({
+                    type: "node_start",
+                    nodeId,
+                    label: typeof node.data?.label === "string"
+                        ? node.data.label
+                        : undefined,
+                    moduleId: node.data?.moduleId,
+                });
+                const startTs = Date.now();
+                try {
+                    const output = await this.executeNode(node, inputs);
+                    const durationMs = Date.now() - startTs;
+                    emit({ type: "node_complete", nodeId, output, durationMs });
+                    return { nodeId, output, skip: false };
+                }
+                catch (err) {
+                    const durationMs = Date.now() - startTs;
+                    const msg = err instanceof Error ? err.message : String(err);
+                    emit({ type: "node_error", nodeId, error: msg, durationMs });
+                    throw err;
+                }
             }));
             for (const r of batchResults) {
                 if (r.skip)
@@ -180,6 +211,16 @@ export class WorkflowEngine {
                 outputs.set(r.nodeId, r.output);
                 executed.add(r.nodeId);
                 executionOrder.push(r.nodeId);
+                // Emit edge_active for every outgoing edge of this completed node.
+                for (const e of adjacency.get(r.nodeId) ?? []) {
+                    emit({
+                        type: "edge_active",
+                        source: r.nodeId,
+                        target: e.target,
+                        sourceHandle: e.sourceHandle,
+                        targetHandle: e.targetHandle,
+                    });
+                }
             }
             // Next ready nodes
             const nextReady = [];
@@ -210,7 +251,14 @@ export class WorkflowEngine {
         const nodeOutputs = {};
         for (const [id, out] of outputs)
             nodeOutputs[id] = out;
-        return { content, messages: [...this.history], nodeOutputs };
+        const finalMessages = [...this.history];
+        emit({
+            type: "workflow_complete",
+            content,
+            messages: finalMessages,
+            nodeOutputs,
+        });
+        return { content, messages: finalMessages, nodeOutputs };
     }
     async executeNode(node, inputs) {
         const moduleId = node.data?.moduleId;

@@ -72,6 +72,46 @@ export interface WorkflowRunResult {
   nodeOutputs: Record<string, unknown>;
 }
 
+// Streaming events emitted during workflow execution for live monitoring.
+export type WorkflowEvent =
+  | {
+      type: "node_start";
+      nodeId: string;
+      label?: string;
+      moduleId?: string;
+    }
+  | {
+      type: "node_complete";
+      nodeId: string;
+      output: unknown;
+      durationMs: number;
+    }
+  | {
+      type: "node_error";
+      nodeId: string;
+      error: string;
+      durationMs: number;
+    }
+  | {
+      type: "edge_active";
+      source: string;
+      target: string;
+      sourceHandle?: string | null;
+      targetHandle?: string | null;
+    }
+  | {
+      type: "workflow_complete";
+      content: string;
+      messages: ChatHistoryMessage[];
+      nodeOutputs: Record<string, unknown>;
+    };
+
+export type WorkflowEventHandler = (event: WorkflowEvent) => void;
+
+export interface WorkflowRunOptions {
+  onEvent?: WorkflowEventHandler;
+}
+
 // ---------------------------------------------------------------------------
 // Graph helpers
 // ---------------------------------------------------------------------------
@@ -259,7 +299,21 @@ export class WorkflowEngine {
     return [...this.history];
   }
 
-  async run(message: string): Promise<WorkflowRunResult> {
+  async run(
+    message: string,
+    options: WorkflowRunOptions = {},
+  ): Promise<WorkflowRunResult> {
+    const onEvent = options.onEvent;
+    const emit = (e: WorkflowEvent): void => {
+      if (onEvent) {
+        try {
+          onEvent(e);
+        } catch (err) {
+          console.warn("[workflow] onEvent threw:", err);
+        }
+      }
+    };
+
     this.history.push({ role: "user", content: message });
 
     const { nodes, edges, entrypoint } = this.workflow;
@@ -304,8 +358,29 @@ export class WorkflowEngine {
             inputs = { message };
           }
 
-          const output = await this.executeNode(node, inputs);
-          return { nodeId, output, skip: false };
+          // Emit node_start right before execution
+          emit({
+            type: "node_start",
+            nodeId,
+            label:
+              typeof node.data?.label === "string"
+                ? node.data.label
+                : undefined,
+            moduleId: node.data?.moduleId,
+          });
+          const startTs = Date.now();
+
+          try {
+            const output = await this.executeNode(node, inputs);
+            const durationMs = Date.now() - startTs;
+            emit({ type: "node_complete", nodeId, output, durationMs });
+            return { nodeId, output, skip: false as const };
+          } catch (err) {
+            const durationMs = Date.now() - startTs;
+            const msg = err instanceof Error ? err.message : String(err);
+            emit({ type: "node_error", nodeId, error: msg, durationMs });
+            throw err;
+          }
         }),
       );
 
@@ -314,6 +389,16 @@ export class WorkflowEngine {
         outputs.set(r.nodeId, r.output);
         executed.add(r.nodeId);
         executionOrder.push(r.nodeId);
+        // Emit edge_active for every outgoing edge of this completed node.
+        for (const e of adjacency.get(r.nodeId) ?? []) {
+          emit({
+            type: "edge_active",
+            source: r.nodeId,
+            target: e.target,
+            sourceHandle: e.sourceHandle,
+            targetHandle: e.targetHandle,
+          });
+        }
       }
 
       // Next ready nodes
@@ -345,7 +430,15 @@ export class WorkflowEngine {
     const nodeOutputs: Record<string, unknown> = {};
     for (const [id, out] of outputs) nodeOutputs[id] = out;
 
-    return { content, messages: [...this.history], nodeOutputs };
+    const finalMessages = [...this.history];
+    emit({
+      type: "workflow_complete",
+      content,
+      messages: finalMessages,
+      nodeOutputs,
+    });
+
+    return { content, messages: finalMessages, nodeOutputs };
   }
 
   private async executeNode(

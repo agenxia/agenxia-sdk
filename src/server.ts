@@ -183,6 +183,19 @@ export async function createAgentServer(
     reply.type("text/html").send(html);
   });
 
+  // Extract message string from A2A params. Supported shapes:
+  //   { message: "..." } | { input: "..." } | { messages: [{content}] }
+  const extractMessage = (params: Record<string, unknown>): string => {
+    if (typeof params.message === "string") return params.message;
+    if (typeof params.input === "string") return params.input;
+    if (Array.isArray((params as Record<string, unknown>).messages)) {
+      const msgs = (params as { messages: Array<{ content?: string }> })
+        .messages;
+      return msgs[msgs.length - 1]?.content ?? "";
+    }
+    return "";
+  };
+
   // POST /a2a — JSON-RPC 2.0
   app.post("/a2a", async (req, reply) => {
     const body = req.body as {
@@ -235,17 +248,7 @@ export async function createAgentServer(
     try {
       let result: A2AResult;
       if (workflowEngine) {
-        // Extract message from A2A params. Supported shapes:
-        //   { message: "..." } | { input: "..." } | { messages: [{content}] }
-        const params = body.params ?? {};
-        let msg = "";
-        if (typeof params.message === "string") msg = params.message;
-        else if (typeof params.input === "string") msg = params.input;
-        else if (Array.isArray((params as Record<string, unknown>).messages)) {
-          const msgs = (params as { messages: Array<{ content?: string }> })
-            .messages;
-          msg = msgs[msgs.length - 1]?.content ?? "";
-        }
+        const msg = extractMessage(body.params ?? {});
         const run = await workflowEngine.run(msg);
         result = {
           content: run.content,
@@ -273,6 +276,64 @@ export async function createAgentServer(
         id: body.id,
         error: { code: A2A_ERROR_CODES.INTERNAL_ERROR, message },
       });
+    }
+  });
+
+  // POST /a2a/stream — same body as /a2a, streams WorkflowEvent via SSE.
+  // Only supported when workflowEngine is loaded.
+  app.post("/a2a/stream", async (req, reply) => {
+    if (!workflowEngine) {
+      return reply.code(400).send({
+        error: "Streaming requires a workflow.json — no engine loaded",
+      });
+    }
+
+    const body = req.body as {
+      jsonrpc?: string;
+      id?: number | string;
+      method?: string;
+      params?: Record<string, unknown>;
+    };
+
+    // Tell Fastify to stop managing this response — we'll write directly
+    // to the raw socket. Without hijack, Fastify buffers and may send its
+    // own reply after ours, corrupting the SSE stream.
+    reply.hijack();
+
+    // SSE headers
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Access-Control-Allow-Origin": "*",
+    });
+
+    let closed = false;
+    reply.raw.on("close", () => {
+      closed = true;
+    });
+
+    const writeEvent = (event: string, data: unknown): void => {
+      if (closed || reply.raw.destroyed) return;
+      reply.raw.write(`event: ${event}\n`);
+      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      const msg = extractMessage(body.params ?? {});
+      await workflowEngine.run(msg, {
+        onEvent: (event) => {
+          // Each event.type becomes the SSE event name; rest is the data payload.
+          const { type, ...rest } = event;
+          writeEvent(type, rest);
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Internal error";
+      writeEvent("error", { message });
+    } finally {
+      if (!closed && !reply.raw.destroyed) reply.raw.end();
     }
   });
 
