@@ -42,6 +42,7 @@ export interface WorkflowEngineOptions {
 export interface WorkflowRunResult {
     content: string;
     messages: ChatHistoryMessage[];
+    nodeOutputs: Record<string, unknown>;
 }
 export declare class WorkflowEngine {
     private readonly workflow;

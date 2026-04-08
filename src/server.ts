@@ -250,6 +250,7 @@ export async function createAgentServer(
         result = {
           content: run.content,
           messages: run.messages,
+          nodeOutputs: run.nodeOutputs,
         } as unknown as A2AResult;
       } else if (processFunc) {
         result = await processFunc({

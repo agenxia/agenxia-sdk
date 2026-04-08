@@ -206,7 +206,11 @@ export class WorkflowEngine {
         const content = this.extractContent(outputs, adjacency, executionOrder);
         console.log(`[workflow] run complete — executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
         this.history.push({ role: "assistant", content });
-        return { content, messages: [...this.history] };
+        // Convert outputs Map -> plain object for serialization
+        const nodeOutputs = {};
+        for (const [id, out] of outputs)
+            nodeOutputs[id] = out;
+        return { content, messages: [...this.history], nodeOutputs };
     }
     async executeNode(node, inputs) {
         const moduleId = node.data?.moduleId;

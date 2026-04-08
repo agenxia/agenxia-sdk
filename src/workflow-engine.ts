@@ -69,6 +69,7 @@ export interface WorkflowEngineOptions {
 export interface WorkflowRunResult {
   content: string;
   messages: ChatHistoryMessage[];
+  nodeOutputs: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +341,11 @@ export class WorkflowEngine {
     );
     this.history.push({ role: "assistant", content });
 
-    return { content, messages: [...this.history] };
+    // Convert outputs Map -> plain object for serialization
+    const nodeOutputs: Record<string, unknown> = {};
+    for (const [id, out] of outputs) nodeOutputs[id] = out;
+
+    return { content, messages: [...this.history], nodeOutputs };
   }
 
   private async executeNode(

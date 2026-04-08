@@ -195,6 +195,7 @@ export async function createAgentServer(options = {}) {
                 result = {
                     content: run.content,
                     messages: run.messages,
+                    nodeOutputs: run.nodeOutputs,
                 };
             }
             else if (processFunc) {
