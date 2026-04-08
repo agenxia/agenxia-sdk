@@ -19,6 +19,7 @@ export type {
   WorkflowEngineOptions,
   WorkflowRunResult,
   WorkflowRunOptions,
+  WorkflowTriggerOptions,
   WorkflowEvent,
   WorkflowEventHandler,
   ModuleContext,

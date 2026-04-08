@@ -75,6 +75,9 @@ export type WorkflowEventHandler = (event: WorkflowEvent) => void;
 export interface WorkflowRunOptions {
     onEvent?: WorkflowEventHandler;
 }
+export interface WorkflowTriggerOptions {
+    onEvent?: WorkflowEventHandler;
+}
 export declare class WorkflowEngine {
     private readonly workflow;
     private readonly modulesDir;
@@ -82,13 +85,37 @@ export declare class WorkflowEngine {
     private readonly llm?;
     private readonly moduleCache;
     private readonly history;
+    private lastOutputs;
+    private hasRun;
+    private runLock;
     constructor(workflow: WorkflowDefinition, options: {
         modulesDir: string;
         manifest: AgentManifest;
         llm?: ReturnType<typeof createLLM>;
     });
     getHistory(): ChatHistoryMessage[];
+    /** Snapshot of the last known outputs for every executed node. */
+    getLastOutputs(): Record<string, unknown>;
+    private withLock;
     run(message: string, options?: WorkflowRunOptions): Promise<WorkflowRunResult>;
+    /**
+     * Reactive re-execution from an interactive widget.
+     *
+     * Used when a node (typically a widget) emits new values on its output
+     * ports — e.g. the user clicks a date in widget-calendar. Only the
+     * descendants of nodeId are re-executed; upstream nodes keep their
+     * cached outputs. nodeId itself is NOT re-executed: its output is set
+     * to the merge of the previous cached output and portValues.
+     *
+     * Requires at least one prior run() call — without a warmed cache,
+     * we cannot resolve inputs for descendants whose other predecessors
+     * live upstream of nodeId.
+     */
+    triggerFromNode(nodeId: string, portValues: Record<string, unknown>, options?: WorkflowTriggerOptions): Promise<WorkflowRunResult>;
+    private _runFull;
+    private _triggerFromNode;
+    private executeBatches;
+    private makeEmitter;
     private executeNode;
     private extractContent;
 }

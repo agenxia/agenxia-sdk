@@ -247,7 +247,22 @@ export async function createAgentServer(
 
     try {
       let result: A2AResult;
-      if (workflowEngine) {
+      if (workflowEngine && body.method === "widget_trigger") {
+        // Reactive re-execution from a widget interaction.
+        const params = body.params ?? {};
+        const nodeId = typeof params.nodeId === "string" ? params.nodeId : "";
+        const portValues =
+          (params.portValues as Record<string, unknown> | undefined) ?? {};
+        if (!nodeId) {
+          throw new Error("widget_trigger: missing nodeId");
+        }
+        const run = await workflowEngine.triggerFromNode(nodeId, portValues);
+        result = {
+          content: run.content,
+          messages: run.messages,
+          nodeOutputs: run.nodeOutputs,
+        } as unknown as A2AResult;
+      } else if (workflowEngine) {
         const msg = extractMessage(body.params ?? {});
         const run = await workflowEngine.run(msg);
         result = {
@@ -321,14 +336,21 @@ export async function createAgentServer(
     };
 
     try {
-      const msg = extractMessage(body.params ?? {});
-      await workflowEngine.run(msg, {
-        onEvent: (event) => {
-          // Each event.type becomes the SSE event name; rest is the data payload.
-          const { type, ...rest } = event;
-          writeEvent(type, rest);
-        },
-      });
+      const onEvent = (event: { type: string; [k: string]: unknown }): void => {
+        const { type, ...rest } = event;
+        writeEvent(type, rest);
+      };
+      if (body.method === "widget_trigger") {
+        const params = body.params ?? {};
+        const nodeId = typeof params.nodeId === "string" ? params.nodeId : "";
+        const portValues =
+          (params.portValues as Record<string, unknown> | undefined) ?? {};
+        if (!nodeId) throw new Error("widget_trigger: missing nodeId");
+        await workflowEngine.triggerFromNode(nodeId, portValues, { onEvent });
+      } else {
+        const msg = extractMessage(body.params ?? {});
+        await workflowEngine.run(msg, { onEvent });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Internal error";
       writeEvent("error", { message });

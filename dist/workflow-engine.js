@@ -28,6 +28,25 @@ function buildGraph(nodes, edges) {
     }
     return { nodeMap, adjacency, reverseAdj };
 }
+/**
+ * Return the set of nodes reachable via outgoing edges from startId.
+ * startId itself is NOT included — it is treated as already executed
+ * (its output is supplied by the caller of triggerFromNode).
+ */
+function descendantsOf(startId, adjacency) {
+    const visited = new Set();
+    const stack = [startId];
+    while (stack.length > 0) {
+        const id = stack.pop();
+        for (const edge of adjacency.get(id) ?? []) {
+            if (!visited.has(edge.target) && edge.target !== startId) {
+                visited.add(edge.target);
+                stack.push(edge.target);
+            }
+        }
+    }
+    return visited;
+}
 /** BFS: is targetId reachable from sourceId in adjacency? Detects back-edges. */
 function isReachable(sourceId, targetId, adjacency) {
     const visited = new Set();
@@ -127,6 +146,14 @@ export class WorkflowEngine {
     llm;
     moduleCache = new Map();
     history = [];
+    // Persistent output cache across runs. Populated by run() and
+    // triggerFromNode(), read by triggerFromNode() to reuse upstream values
+    // without re-executing ancestors.
+    lastOutputs = new Map();
+    hasRun = false;
+    // Mutex: serialize run() and triggerFromNode() to prevent concurrent
+    // mutations of lastOutputs.
+    runLock = Promise.resolve();
     constructor(workflow, options) {
         this.workflow = workflow;
         this.modulesDir = options.modulesDir;
@@ -136,25 +163,61 @@ export class WorkflowEngine {
     getHistory() {
         return [...this.history];
     }
+    /** Snapshot of the last known outputs for every executed node. */
+    getLastOutputs() {
+        const out = {};
+        for (const [id, v] of this.lastOutputs)
+            out[id] = v;
+        return out;
+    }
+    async withLock(fn) {
+        const prev = this.runLock;
+        let release;
+        const gate = new Promise((r) => (release = r));
+        this.runLock = prev.then(() => gate).catch(() => gate);
+        try {
+            await prev;
+        }
+        catch {
+            // previous run errored — we still proceed
+        }
+        try {
+            return await fn();
+        }
+        finally {
+            release();
+        }
+    }
     async run(message, options = {}) {
-        const onEvent = options.onEvent;
-        const emit = (e) => {
-            if (onEvent) {
-                try {
-                    onEvent(e);
-                }
-                catch (err) {
-                    console.warn("[workflow] onEvent threw:", err);
-                }
-            }
-        };
+        return this.withLock(() => this._runFull(message, options));
+    }
+    /**
+     * Reactive re-execution from an interactive widget.
+     *
+     * Used when a node (typically a widget) emits new values on its output
+     * ports — e.g. the user clicks a date in widget-calendar. Only the
+     * descendants of nodeId are re-executed; upstream nodes keep their
+     * cached outputs. nodeId itself is NOT re-executed: its output is set
+     * to the merge of the previous cached output and portValues.
+     *
+     * Requires at least one prior run() call — without a warmed cache,
+     * we cannot resolve inputs for descendants whose other predecessors
+     * live upstream of nodeId.
+     */
+    async triggerFromNode(nodeId, portValues, options = {}) {
+        return this.withLock(() => this._triggerFromNode(nodeId, portValues, options));
+    }
+    // -------------------------------------------------------------------------
+    // Internal: full workflow run (classic chat message entry)
+    // -------------------------------------------------------------------------
+    async _runFull(message, options) {
+        const emit = this.makeEmitter(options.onEvent);
         this.history.push({ role: "user", content: message });
         const { nodes, edges, entrypoint } = this.workflow;
         const graph = buildGraph(nodes, edges);
         const { nodeMap, adjacency, reverseAdj } = graph;
         const outputs = new Map();
         const executed = new Set();
-        const executionOrder = [];
         // Determine roots: nodes without incoming edges.
         const roots = [];
         for (const [nodeId] of nodeMap) {
@@ -167,10 +230,161 @@ export class WorkflowEngine {
         }
         // Entrypoint node gets the message as passthrough input.
         const entryIds = new Set(entrypoint && nodeMap.has(entrypoint) ? [entrypoint] : roots);
-        let readyQueue = roots.length > 0 ? [...roots] : entrypoint ? [entrypoint] : [];
-        if (readyQueue.length === 0) {
+        const initialReady = roots.length > 0 ? [...roots] : entrypoint ? [entrypoint] : [];
+        if (initialReady.length === 0) {
             throw new Error("Workflow has no executable entry node");
         }
+        const executionOrder = await this.executeBatches({
+            nodeMap,
+            adjacency,
+            reverseAdj,
+            outputs,
+            executed,
+            initialReady,
+            allowedNodes: null, // full graph
+            entryInputs: (id) => (entryIds.has(id) ? { message } : null),
+            emit,
+        });
+        const content = this.extractContent(outputs, adjacency, executionOrder);
+        console.log(`[workflow] run complete — executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
+        this.history.push({ role: "assistant", content });
+        // Persist outputs for future reactive triggers
+        this.lastOutputs = new Map(outputs);
+        this.hasRun = true;
+        const nodeOutputs = {};
+        for (const [id, out] of outputs)
+            nodeOutputs[id] = out;
+        const finalMessages = [...this.history];
+        emit({
+            type: "workflow_complete",
+            content,
+            messages: finalMessages,
+            nodeOutputs,
+        });
+        return { content, messages: finalMessages, nodeOutputs };
+    }
+    // -------------------------------------------------------------------------
+    // Internal: reactive subgraph re-execution
+    // -------------------------------------------------------------------------
+    async _triggerFromNode(startId, portValues, options) {
+        if (!this.hasRun) {
+            throw new Error("triggerFromNode: no previous run — call run() first to warm the output cache");
+        }
+        const emit = this.makeEmitter(options.onEvent);
+        const { nodes, edges } = this.workflow;
+        const graph = buildGraph(nodes, edges);
+        const { nodeMap, adjacency, reverseAdj } = graph;
+        if (!nodeMap.has(startId)) {
+            throw new Error(`triggerFromNode: node "${startId}" not found in workflow`);
+        }
+        // Validate portValues against declared ports if any — warn, don't throw.
+        const declaredPorts = nodeMap.get(startId)?.data?.ports;
+        if (declaredPorts && typeof declaredPorts === "object") {
+            const known = new Set(Object.keys(declaredPorts));
+            for (const key of Object.keys(portValues)) {
+                if (!known.has(key)) {
+                    console.warn(`[workflow] triggerFromNode: port "${key}" not declared on node "${startId}"`);
+                }
+            }
+        }
+        // Log the interaction as a system entry (not a user message).
+        this.history.push({
+            role: "system",
+            content: `[widget ${startId} → ${JSON.stringify(portValues)}]`,
+        });
+        // Seed outputs from the cache and merge portValues into startId's entry.
+        const outputs = new Map(this.lastOutputs);
+        const prevStartOut = this.lastOutputs.get(startId);
+        const mergedStartOut = {
+            ...(prevStartOut && typeof prevStartOut === "object"
+                ? prevStartOut
+                : {}),
+            ...portValues,
+        };
+        outputs.set(startId, mergedStartOut);
+        // Compute downstream subgraph.
+        const subgraph = descendantsOf(startId, adjacency);
+        // Seed executed with everything OUTSIDE the subgraph (they are
+        // considered already-done, backed by lastOutputs). startId is also
+        // marked executed so its merged output is used by descendants.
+        const executed = new Set();
+        for (const [id] of nodeMap) {
+            if (!subgraph.has(id))
+                executed.add(id);
+        }
+        // No descendants — nothing to re-run. Still persist the new startId
+        // output and emit workflow_complete immediately.
+        if (subgraph.size === 0) {
+            this.lastOutputs.set(startId, mergedStartOut);
+            const nodeOutputs = {};
+            for (const [id, v] of this.lastOutputs)
+                nodeOutputs[id] = v;
+            const content = this.extractContent(outputs, adjacency, [startId]);
+            const finalMessages = [...this.history];
+            emit({
+                type: "workflow_complete",
+                content,
+                messages: finalMessages,
+                nodeOutputs,
+            });
+            return { content, messages: finalMessages, nodeOutputs };
+        }
+        // Initial ready = direct descendants of startId whose other
+        // predecessors are all outside the subgraph (and therefore already
+        // marked executed via seeding).
+        const initialReady = [];
+        for (const id of subgraph) {
+            const incoming = reverseAdj.get(id) ?? [];
+            // Must have at least one incoming from startId or an executed source.
+            const hasAnyExecutedPred = incoming.some((e) => executed.has(e.source));
+            const allResolved = incoming.every((e) => {
+                if (executed.has(e.source))
+                    return true;
+                return isReachable(id, e.source, adjacency);
+            });
+            if (hasAnyExecutedPred && allResolved)
+                initialReady.push(id);
+        }
+        const executionOrder = await this.executeBatches({
+            nodeMap,
+            adjacency,
+            reverseAdj,
+            outputs,
+            executed,
+            initialReady,
+            allowedNodes: subgraph,
+            entryInputs: () => null,
+            emit,
+        });
+        const content = this.extractContent(outputs, adjacency, executionOrder);
+        console.log(`[workflow] trigger from ${startId} complete — re-executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
+        // Merge the re-executed outputs back into lastOutputs. Nodes
+        // outside the subgraph keep their previous value untouched.
+        this.lastOutputs.set(startId, mergedStartOut);
+        for (const id of subgraph) {
+            if (outputs.has(id))
+                this.lastOutputs.set(id, outputs.get(id));
+        }
+        const nodeOutputs = {};
+        for (const [id, v] of this.lastOutputs)
+            nodeOutputs[id] = v;
+        const finalMessages = [...this.history];
+        emit({
+            type: "workflow_complete",
+            content,
+            messages: finalMessages,
+            nodeOutputs,
+        });
+        return { content, messages: finalMessages, nodeOutputs };
+    }
+    // -------------------------------------------------------------------------
+    // Internal: shared BFS batch executor used by run() and triggerFromNode()
+    // -------------------------------------------------------------------------
+    async executeBatches(params) {
+        const { nodeMap, adjacency, reverseAdj, outputs, executed, allowedNodes, entryInputs, emit, } = params;
+        const executionOrder = [];
+        const isAllowed = (id) => allowedNodes === null || allowedNodes.has(id);
+        let readyQueue = params.initialReady.filter((id) => isAllowed(id));
         while (readyQueue.length > 0) {
             const batch = readyQueue;
             const batchResults = await Promise.all(batch.map(async (nodeId) => {
@@ -178,11 +392,10 @@ export class WorkflowEngine {
                 if (!node || executed.has(nodeId))
                     return { nodeId, output: null, skip: true };
                 let inputs = resolveInputs(nodeId, reverseAdj, outputs, executed);
-                // Entrypoint / roots receive the message
-                if (entryIds.has(nodeId) && Object.keys(inputs).length === 0) {
-                    inputs = { message };
+                const entry = entryInputs(nodeId);
+                if (entry && Object.keys(inputs).length === 0) {
+                    inputs = entry;
                 }
-                // Emit node_start right before execution
                 emit({
                     type: "node_start",
                     nodeId,
@@ -211,7 +424,6 @@ export class WorkflowEngine {
                 outputs.set(r.nodeId, r.output);
                 executed.add(r.nodeId);
                 executionOrder.push(r.nodeId);
-                // Emit edge_active for every outgoing edge of this completed node.
                 for (const e of adjacency.get(r.nodeId) ?? []) {
                     emit({
                         type: "edge_active",
@@ -222,10 +434,12 @@ export class WorkflowEngine {
                     });
                 }
             }
-            // Next ready nodes
+            // Compute next ready batch, restricted to allowedNodes if set.
             const nextReady = [];
             for (const [nodeId] of nodeMap) {
                 if (executed.has(nodeId))
+                    continue;
+                if (!isAllowed(nodeId))
                     continue;
                 const incoming = reverseAdj.get(nodeId) ?? [];
                 if (incoming.length === 0)
@@ -233,7 +447,6 @@ export class WorkflowEngine {
                 const allResolved = incoming.every((e) => {
                     if (executed.has(e.source))
                         return true;
-                    // Back-edge: target is reachable from source -> we are upstream of source
                     return isReachable(nodeId, e.source, adjacency);
                 });
                 const hasAnyExecutedPred = incoming.some((e) => executed.has(e.source));
@@ -242,23 +455,19 @@ export class WorkflowEngine {
             }
             readyQueue = nextReady;
         }
-        // Extract response: prefer `response` field from any executed node
-        // (LLM modules emit it), then fall back to sinks.
-        const content = this.extractContent(outputs, adjacency, executionOrder);
-        console.log(`[workflow] run complete — executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
-        this.history.push({ role: "assistant", content });
-        // Convert outputs Map -> plain object for serialization
-        const nodeOutputs = {};
-        for (const [id, out] of outputs)
-            nodeOutputs[id] = out;
-        const finalMessages = [...this.history];
-        emit({
-            type: "workflow_complete",
-            content,
-            messages: finalMessages,
-            nodeOutputs,
-        });
-        return { content, messages: finalMessages, nodeOutputs };
+        return executionOrder;
+    }
+    makeEmitter(onEvent) {
+        return (e) => {
+            if (!onEvent)
+                return;
+            try {
+                onEvent(e);
+            }
+            catch (err) {
+                console.warn("[workflow] onEvent threw:", err);
+            }
+        };
     }
     async executeNode(node, inputs) {
         const moduleId = node.data?.moduleId;
