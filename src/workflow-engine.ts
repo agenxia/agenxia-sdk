@@ -6,7 +6,6 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { AgentManifest } from "./types.js";
 import type { createLLM } from "./llm.js";
 
@@ -172,32 +171,61 @@ function resolveInputs(
 // Module loader
 // ---------------------------------------------------------------------------
 
+// Load modules/<id>/execute.js files that use CommonJS
+// (module.exports = function) even when the agent's package.json has
+// "type": "module".
+//
+// Neither import() nor createRequire() work here: Node resolves .js
+// format from the nearest package.json, so a CJS-style file under an
+// ESM package is rejected with "module is not defined".
+//
+// Solution (matches the platform's own runner): read the source, wrap
+// it in a CJS shim, and evaluate with `new Function`.
+function loadModuleSync(modulesDir: string, moduleId: string): ModuleExecuteFn {
+  const execPath = join(modulesDir, moduleId, "execute.js");
+  if (!existsSync(execPath)) {
+    // Passthrough
+    return async (inputs) => inputs as Record<string, unknown>;
+  }
+  try {
+    const code = readFileSync(execPath, "utf-8");
+    const wrapped = `
+      const module = { exports: {} };
+      const exports = module.exports;
+      ${code}
+      return module.exports;
+    `;
+    const factory = new Function("require", "fetch", "console", wrapped) as (
+      req: (id: string) => unknown,
+      f: typeof fetch,
+      c: typeof console,
+    ) => unknown;
+    const noRequire = (id: string) => {
+      throw new Error(`require('${id}') not available in module sandbox`);
+    };
+    const exported = factory(noRequire, globalThis.fetch, console);
+    if (typeof exported === "function") return exported as ModuleExecuteFn;
+    if (
+      exported &&
+      typeof (exported as { default?: unknown }).default === "function"
+    ) {
+      return (exported as { default: ModuleExecuteFn }).default;
+    }
+    console.warn(
+      `[workflow] module ${moduleId} did not export a function, using passthrough`,
+    );
+    return async (inputs) => inputs as Record<string, unknown>;
+  } catch (err) {
+    console.warn(`[workflow] failed to load module ${moduleId}:`, err);
+    return async (inputs) => inputs as Record<string, unknown>;
+  }
+}
+
 async function loadModule(
   modulesDir: string,
   moduleId: string,
 ): Promise<ModuleExecuteFn> {
-  const execPath = join(modulesDir, moduleId, "execute.js");
-  if (!existsSync(execPath)) {
-    // Passthrough
-    return async (inputs) => inputs;
-  }
-  try {
-    const mod = (await import(pathToFileURL(execPath).href)) as {
-      default?: ModuleExecuteFn;
-    };
-    // CommonJS via ESM interop: default export is module.exports
-    const fn =
-      typeof mod.default === "function"
-        ? mod.default
-        : (mod as unknown as ModuleExecuteFn);
-    if (typeof fn !== "function") {
-      return async (inputs) => inputs;
-    }
-    return fn;
-  } catch (err) {
-    console.warn(`[workflow] failed to load module ${moduleId}:`, err);
-    return async (inputs) => inputs;
-  }
+  return loadModuleSync(modulesDir, moduleId);
 }
 
 // ---------------------------------------------------------------------------

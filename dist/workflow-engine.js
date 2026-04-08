@@ -5,7 +5,6 @@
 // A module without execute.js is treated as passthrough.
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 function buildGraph(nodes, edges) {
     const nodeMap = new Map();
     const adjacency = new Map();
@@ -72,27 +71,51 @@ function resolveInputs(nodeId, reverseAdj, outputs, executed) {
 // ---------------------------------------------------------------------------
 // Module loader
 // ---------------------------------------------------------------------------
-async function loadModule(modulesDir, moduleId) {
+// Load modules/<id>/execute.js files that use CommonJS
+// (module.exports = function) even when the agent's package.json has
+// "type": "module".
+//
+// Neither import() nor createRequire() work here: Node resolves .js
+// format from the nearest package.json, so a CJS-style file under an
+// ESM package is rejected with "module is not defined".
+//
+// Solution (matches the platform's own runner): read the source, wrap
+// it in a CJS shim, and evaluate with `new Function`.
+function loadModuleSync(modulesDir, moduleId) {
     const execPath = join(modulesDir, moduleId, "execute.js");
     if (!existsSync(execPath)) {
         // Passthrough
         return async (inputs) => inputs;
     }
     try {
-        const mod = (await import(pathToFileURL(execPath).href));
-        // CommonJS via ESM interop: default export is module.exports
-        const fn = typeof mod.default === "function"
-            ? mod.default
-            : mod;
-        if (typeof fn !== "function") {
-            return async (inputs) => inputs;
+        const code = readFileSync(execPath, "utf-8");
+        const wrapped = `
+      const module = { exports: {} };
+      const exports = module.exports;
+      ${code}
+      return module.exports;
+    `;
+        const factory = new Function("require", "fetch", "console", wrapped);
+        const noRequire = (id) => {
+            throw new Error(`require('${id}') not available in module sandbox`);
+        };
+        const exported = factory(noRequire, globalThis.fetch, console);
+        if (typeof exported === "function")
+            return exported;
+        if (exported &&
+            typeof exported.default === "function") {
+            return exported.default;
         }
-        return fn;
+        console.warn(`[workflow] module ${moduleId} did not export a function, using passthrough`);
+        return async (inputs) => inputs;
     }
     catch (err) {
         console.warn(`[workflow] failed to load module ${moduleId}:`, err);
         return async (inputs) => inputs;
     }
+}
+async function loadModule(modulesDir, moduleId) {
+    return loadModuleSync(modulesDir, moduleId);
 }
 // ---------------------------------------------------------------------------
 // Engine
