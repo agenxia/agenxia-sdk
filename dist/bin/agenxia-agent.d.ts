@@ -1,3 +1,3 @@
 #!/usr/bin/env node
-export {};
+import "dotenv/config";
 //# sourceMappingURL=agenxia-agent.d.ts.map
