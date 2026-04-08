@@ -8,7 +8,34 @@ import { A2A_ERROR_CODES } from "./a2a/types.js";
 import { generateAgentCard } from "./agent-card.js";
 import { generateDocs } from "./docs.js";
 import { createLLM } from "./llm.js";
-import { createWorkflowEngine, defaultWorkflowPaths, } from "./workflow-engine.js";
+import { WorkflowEngine, defaultWorkflowPaths, loadWorkflowDefinition, } from "./workflow-engine.js";
+/**
+ * Scan workflow nodes for LLM params. Returns the first node.data.config
+ * that carries at least one LLM field. The agent-core node is typically
+ * the source, but any module can provide them.
+ */
+function findLLMParams(def) {
+    const LLM_KEYS = [
+        "llm_api_url",
+        "llm_api_key",
+        "model",
+        "system_prompt",
+        "temperature",
+        "max_tokens",
+    ];
+    // Prefer agent-core explicitly, then any node that has LLM keys.
+    const core = def.nodes.find((n) => n.data?.moduleId === "agent-core");
+    const candidates = core
+        ? [core, ...def.nodes.filter((n) => n !== core)]
+        : def.nodes;
+    for (const node of candidates) {
+        const config = (node.data?.config ?? {});
+        if (LLM_KEYS.some((k) => config[k] !== undefined && config[k] !== "")) {
+            return config;
+        }
+    }
+    return null;
+}
 /**
  * Create and start the agent server.
  *
@@ -42,38 +69,51 @@ export async function createAgentServer(options = {}) {
     catch {
         console.warn(`Warning: Could not import ${processPath}`);
     }
-    // 3. Create LLM client if env vars available (LLM is OPTIONAL)
+    // 3. Load workflow.json — it is the source of truth for module params,
+    //    including LLM config. agenxia.json is reserved for external identity.
+    const { workflowPath, modulesDir } = defaultWorkflowPaths(manifestPath);
+    const workflowDef = loadWorkflowDefinition(workflowPath);
+    if (workflowDef) {
+        console.log(`[workflow] loaded ${workflowPath}`);
+    }
+    // 4. Create LLM client. Priority: workflow node config > env vars > none.
+    //    LLM is OPTIONAL — agents without any LLM field simply get undefined.
     let llm;
-    const config = manifest.config;
-    const apiUrl = process.env.LLM_API_URL ?? "";
-    const apiKey = process.env.LLM_API_KEY ?? "";
+    const workflowParams = workflowDef ? findLLMParams(workflowDef) : null;
+    const pick = (key) => {
+        const v = workflowParams?.[key];
+        return typeof v === "string" && v !== "" ? v : undefined;
+    };
+    const pickNumber = (key) => {
+        const v = workflowParams?.[key];
+        return typeof v === "number" ? v : undefined;
+    };
+    const apiUrl = pick("llm_api_url") ?? process.env.LLM_API_URL ?? "";
+    const apiKey = pick("llm_api_key") ?? process.env.LLM_API_KEY ?? "";
     if (apiUrl && apiKey) {
         const llmOptions = {
             apiUrl,
             apiKey,
-            model: config?.model ?? "gpt-4o-mini",
-            systemPrompt: config?.system_prompt,
-            temperature: config?.temperature,
-            maxTokens: config?.max_tokens,
+            model: pick("model") ?? process.env.LLM_MODEL ?? "gpt-4o-mini",
+            systemPrompt: pick("system_prompt") ?? process.env.LLM_SYSTEM_PROMPT,
+            temperature: pickNumber("temperature"),
+            maxTokens: pickNumber("max_tokens"),
         };
         llm = createLLM(llmOptions);
     }
-    // 4. Try to load workflow.json — if found, the engine replaces processFunc
-    const { workflowPath, modulesDir } = defaultWorkflowPaths(manifestPath);
+    // 5. Create workflow engine from already-loaded definition
     let workflowEngine = null;
-    try {
-        workflowEngine = createWorkflowEngine({
-            workflowPath,
-            modulesDir,
-            manifest,
-            llm,
-        });
-        if (workflowEngine) {
-            console.log(`[workflow] loaded ${workflowPath}`);
+    if (workflowDef) {
+        try {
+            workflowEngine = new WorkflowEngine(workflowDef, {
+                modulesDir,
+                manifest,
+                llm,
+            });
         }
-    }
-    catch (err) {
-        console.warn(`[workflow] failed to initialize:`, err);
+        catch (err) {
+            console.warn(`[workflow] failed to initialize:`, err);
+        }
     }
     // 5. Generate agent card
     const rootDir = resolve(manifestPath, "..");
