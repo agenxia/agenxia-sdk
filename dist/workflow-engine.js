@@ -166,12 +166,13 @@ export class WorkflowEngine {
     llm;
     moduleCache = new Map();
     history = [];
-    // Persistent output cache across runs. Populated by run() and
-    // triggerFromNode(), read by triggerFromNode() to reuse upstream values
-    // without re-executing ancestors.
+    // Persistent output cache across start() calls. Reads: used as
+    // upstream input source for nodes outside the subgraph being
+    // re-executed. Writes: updated at the end of each start() with the
+    // new outputs of executed nodes; nodes outside the subgraph keep
+    // their previous values untouched.
     lastOutputs = new Map();
-    hasRun = false;
-    // Mutex: serialize run() and triggerFromNode() to prevent concurrent
+    // Mutex: serialize concurrent start() calls to prevent interleaved
     // mutations of lastOutputs.
     runLock = Promise.resolve();
     constructor(workflow, options) {
@@ -208,163 +209,63 @@ export class WorkflowEngine {
             release();
         }
     }
-    async run(message, options = {}) {
-        return this.withLock(() => this._runFull(message, options));
-    }
     /**
-     * Reactive re-execution from an interactive widget.
+     * Execute the workflow from a specific node.
      *
-     * Used when a node (typically a widget) emits new values on its output
-     * ports — e.g. the user clicks a date in widget-calendar. Only the
-     * descendants of nodeId are re-executed; upstream nodes keep their
-     * cached outputs. nodeId itself is NOT re-executed: its output is set
-     * to the merge of the previous cached output and portValues.
+     * Single execution primitive of the engine. Covers both the initial
+     * "run from scratch" and reactive re-execution from a widget:
      *
-     * Requires at least one prior run() call — without a warmed cache,
-     * we cannot resolve inputs for descendants whose other predecessors
-     * live upstream of nodeId.
+     * - `nodeId` defaults to `workflow.entrypoint`. Must exist.
+     * - `values` are merged on top of the start node's computed inputs
+     *   (which themselves come from resolveInputs on cached upstream
+     *   outputs, if any). The start node then runs normally through its
+     *   module (or passthrough).
+     * - Only the start node and its descendants are re-executed. Nodes
+     *   outside the descendant subgraph keep their cached outputs.
+     * - On the first call `lastOutputs` is empty; descendants whose
+     *   upstream dependencies are unresolved are simply skipped by the
+     *   scheduler.
+     * - `lastOutputs` is updated with the new outputs of executed nodes.
+     *
+     * Conversational workflows are a convention, not a feature: pass
+     * `values: { message: "..." }` and let the edges route it where the
+     * workflow author wired it.
      */
-    async triggerFromNode(nodeId, portValues, options = {}) {
-        return this.withLock(() => this._triggerFromNode(nodeId, portValues, options));
+    async start(nodeId, values = {}, options = {}) {
+        return this.withLock(() => this._start(nodeId, values, options));
     }
     // -------------------------------------------------------------------------
-    // Internal: full workflow run (classic chat message entry)
+    // Internal: unified start implementation
     // -------------------------------------------------------------------------
-    async _runFull(message, options) {
+    async _start(requestedNodeId, values, options) {
         const emit = this.makeEmitter(options.onEvent);
-        this.history.push({ role: "user", content: message });
         const { nodes, edges, entrypoint } = this.workflow;
         const graph = buildGraph(nodes, edges);
         const { nodeMap, adjacency, reverseAdj } = graph;
-        const outputs = new Map();
-        const executed = new Set();
-        // Determine roots: nodes without incoming edges.
-        const roots = [];
-        for (const [nodeId] of nodeMap) {
-            if ((reverseAdj.get(nodeId) ?? []).length === 0)
-                roots.push(nodeId);
+        const startId = requestedNodeId ?? entrypoint;
+        if (!startId) {
+            throw new Error("start: no nodeId provided and workflow.entrypoint is not set");
         }
-        // If no roots (cyclic) and entrypoint provided, use it.
-        if (roots.length === 0 && entrypoint && nodeMap.has(entrypoint)) {
-            roots.push(entrypoint);
-        }
-        // Entrypoint node gets the message as passthrough input.
-        const entryIds = new Set(entrypoint && nodeMap.has(entrypoint) ? [entrypoint] : roots);
-        const initialReady = roots.length > 0 ? [...roots] : entrypoint ? [entrypoint] : [];
-        if (initialReady.length === 0) {
-            throw new Error("Workflow has no executable entry node");
-        }
-        const executionOrder = await this.executeBatches({
-            nodeMap,
-            adjacency,
-            reverseAdj,
-            outputs,
-            executed,
-            initialReady,
-            allowedNodes: null, // full graph
-            entryInputs: (id) => (entryIds.has(id) ? { message } : null),
-            emit,
-        });
-        const content = this.extractContent(outputs, adjacency, executionOrder);
-        console.log(`[workflow] run complete — executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
-        this.history.push({ role: "assistant", content });
-        // Persist outputs for future reactive triggers
-        this.lastOutputs = new Map(outputs);
-        this.hasRun = true;
-        const nodeOutputs = {};
-        for (const [id, out] of outputs)
-            nodeOutputs[id] = out;
-        const finalMessages = [...this.history];
-        emit({
-            type: "workflow_complete",
-            content,
-            messages: finalMessages,
-            nodeOutputs,
-        });
-        return { content, messages: finalMessages, nodeOutputs };
-    }
-    // -------------------------------------------------------------------------
-    // Internal: reactive subgraph re-execution
-    // -------------------------------------------------------------------------
-    async _triggerFromNode(startId, portValues, options) {
-        if (!this.hasRun) {
-            throw new Error("triggerFromNode: no previous run — call run() first to warm the output cache");
-        }
-        const emit = this.makeEmitter(options.onEvent);
-        const { nodes, edges } = this.workflow;
-        const graph = buildGraph(nodes, edges);
-        const { nodeMap, adjacency, reverseAdj } = graph;
         if (!nodeMap.has(startId)) {
-            throw new Error(`triggerFromNode: node "${startId}" not found in workflow`);
+            throw new Error(`start: node "${startId}" not found in workflow`);
         }
-        // Validate portValues against declared ports if any — warn, don't throw.
-        const declaredPorts = nodeMap.get(startId)?.data?.ports;
-        if (declaredPorts && typeof declaredPorts === "object") {
-            const known = new Set(Object.keys(declaredPorts));
-            for (const key of Object.keys(portValues)) {
-                if (!known.has(key)) {
-                    console.warn(`[workflow] triggerFromNode: port "${key}" not declared on node "${startId}"`);
-                }
-            }
-        }
-        // Log the interaction as a system entry (not a user message).
-        this.history.push({
-            role: "system",
-            content: `[widget ${startId} → ${JSON.stringify(portValues)}]`,
-        });
-        // Seed outputs from the cache and merge portValues into startId's entry.
+        // Subgraph = startId + all its descendants. Anything outside is
+        // frozen: its cached output is reused as-is.
+        const descendants = descendantsOf(startId, adjacency);
+        const subgraph = new Set([startId, ...descendants]);
+        // Seed outputs from the cache, then drop stale entries for nodes
+        // we are about to re-execute.
         const outputs = new Map(this.lastOutputs);
-        const prevStartOut = this.lastOutputs.get(startId);
-        const mergedStartOut = {
-            ...(prevStartOut && typeof prevStartOut === "object"
-                ? prevStartOut
-                : {}),
-            ...portValues,
-        };
-        outputs.set(startId, mergedStartOut);
-        // Compute downstream subgraph.
-        const subgraph = descendantsOf(startId, adjacency);
-        // Seed executed with everything OUTSIDE the subgraph (they are
-        // considered already-done, backed by lastOutputs). startId is also
-        // marked executed so its merged output is used by descendants.
+        for (const id of subgraph)
+            outputs.delete(id);
+        // Seed `executed` with every non-subgraph node that has a cached
+        // output: from the scheduler's point of view they are done.
         const executed = new Set();
         for (const [id] of nodeMap) {
-            if (!subgraph.has(id))
+            if (!subgraph.has(id) && this.lastOutputs.has(id))
                 executed.add(id);
         }
-        // No descendants — nothing to re-run. Still persist the new startId
-        // output and emit workflow_complete immediately.
-        if (subgraph.size === 0) {
-            this.lastOutputs.set(startId, mergedStartOut);
-            const nodeOutputs = {};
-            for (const [id, v] of this.lastOutputs)
-                nodeOutputs[id] = v;
-            const content = this.extractContent(outputs, adjacency, [startId]);
-            const finalMessages = [...this.history];
-            emit({
-                type: "workflow_complete",
-                content,
-                messages: finalMessages,
-                nodeOutputs,
-            });
-            return { content, messages: finalMessages, nodeOutputs };
-        }
-        // Initial ready = direct descendants of startId whose other
-        // predecessors are all outside the subgraph (and therefore already
-        // marked executed via seeding).
-        const initialReady = [];
-        for (const id of subgraph) {
-            const incoming = reverseAdj.get(id) ?? [];
-            // Must have at least one incoming from startId or an executed source.
-            const hasAnyExecutedPred = incoming.some((e) => executed.has(e.source));
-            const allResolved = incoming.every((e) => {
-                if (executed.has(e.source))
-                    return true;
-                return isReachable(id, e.source, adjacency);
-            });
-            if (hasAnyExecutedPred && allResolved)
-                initialReady.push(id);
-        }
+        const initialReady = [startId];
         const executionOrder = await this.executeBatches({
             nodeMap,
             adjacency,
@@ -373,14 +274,14 @@ export class WorkflowEngine {
             executed,
             initialReady,
             allowedNodes: subgraph,
-            entryInputs: () => null,
+            // Merge `values` on top of resolveInputs for the start node only.
+            entryInputs: (id) => (id === startId ? values : null),
             emit,
         });
         const content = this.extractContent(outputs, adjacency, executionOrder);
-        console.log(`[workflow] trigger from ${startId} complete — re-executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
-        // Merge the re-executed outputs back into lastOutputs. Nodes
-        // outside the subgraph keep their previous value untouched.
-        this.lastOutputs.set(startId, mergedStartOut);
+        console.log(`[workflow] start from ${startId} complete — executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
+        // Commit new outputs to the persistent cache. Non-subgraph nodes
+        // keep their previous value.
         for (const id of subgraph) {
             if (outputs.has(id))
                 this.lastOutputs.set(id, outputs.get(id));
@@ -412,9 +313,10 @@ export class WorkflowEngine {
                 if (!node || executed.has(nodeId))
                     return { nodeId, output: null, skip: true };
                 let inputs = resolveInputs(nodeId, reverseAdj, outputs, executed);
+                // For the start node, merge `values` on top of computed inputs.
                 const entry = entryInputs(nodeId);
-                if (entry && Object.keys(inputs).length === 0) {
-                    inputs = entry;
+                if (entry) {
+                    inputs = { ...inputs, ...entry };
                 }
                 emit({
                     type: "node_start",

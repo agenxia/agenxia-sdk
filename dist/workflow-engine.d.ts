@@ -72,10 +72,7 @@ export type WorkflowEvent = {
     nodeOutputs: Record<string, unknown>;
 };
 export type WorkflowEventHandler = (event: WorkflowEvent) => void;
-export interface WorkflowRunOptions {
-    onEvent?: WorkflowEventHandler;
-}
-export interface WorkflowTriggerOptions {
+export interface StartOptions {
     onEvent?: WorkflowEventHandler;
 }
 export declare class WorkflowEngine {
@@ -86,7 +83,6 @@ export declare class WorkflowEngine {
     private readonly moduleCache;
     private readonly history;
     private lastOutputs;
-    private hasRun;
     private runLock;
     constructor(workflow: WorkflowDefinition, options: {
         modulesDir: string;
@@ -97,23 +93,30 @@ export declare class WorkflowEngine {
     /** Snapshot of the last known outputs for every executed node. */
     getLastOutputs(): Record<string, unknown>;
     private withLock;
-    run(message: string, options?: WorkflowRunOptions): Promise<WorkflowRunResult>;
     /**
-     * Reactive re-execution from an interactive widget.
+     * Execute the workflow from a specific node.
      *
-     * Used when a node (typically a widget) emits new values on its output
-     * ports — e.g. the user clicks a date in widget-calendar. Only the
-     * descendants of nodeId are re-executed; upstream nodes keep their
-     * cached outputs. nodeId itself is NOT re-executed: its output is set
-     * to the merge of the previous cached output and portValues.
+     * Single execution primitive of the engine. Covers both the initial
+     * "run from scratch" and reactive re-execution from a widget:
      *
-     * Requires at least one prior run() call — without a warmed cache,
-     * we cannot resolve inputs for descendants whose other predecessors
-     * live upstream of nodeId.
+     * - `nodeId` defaults to `workflow.entrypoint`. Must exist.
+     * - `values` are merged on top of the start node's computed inputs
+     *   (which themselves come from resolveInputs on cached upstream
+     *   outputs, if any). The start node then runs normally through its
+     *   module (or passthrough).
+     * - Only the start node and its descendants are re-executed. Nodes
+     *   outside the descendant subgraph keep their cached outputs.
+     * - On the first call `lastOutputs` is empty; descendants whose
+     *   upstream dependencies are unresolved are simply skipped by the
+     *   scheduler.
+     * - `lastOutputs` is updated with the new outputs of executed nodes.
+     *
+     * Conversational workflows are a convention, not a feature: pass
+     * `values: { message: "..." }` and let the edges route it where the
+     * workflow author wired it.
      */
-    triggerFromNode(nodeId: string, portValues: Record<string, unknown>, options?: WorkflowTriggerOptions): Promise<WorkflowRunResult>;
-    private _runFull;
-    private _triggerFromNode;
+    start(nodeId?: string, values?: Record<string, unknown>, options?: StartOptions): Promise<WorkflowRunResult>;
+    private _start;
     private executeBatches;
     private makeEmitter;
     private executeNode;

@@ -137,19 +137,16 @@ export async function createAgentServer(options = {}) {
         const html = generateDocs(card, deployUrl);
         reply.type("text/html").send(html);
     });
-    // Extract message string from A2A params. Supported shapes:
-    //   { message: "..." } | { input: "..." } | { messages: [{content}] }
-    const extractMessage = (params) => {
-        if (typeof params.message === "string")
-            return params.message;
-        if (typeof params.input === "string")
-            return params.input;
-        if (Array.isArray(params.messages)) {
-            const msgs = params
-                .messages;
-            return msgs[msgs.length - 1]?.content ?? "";
-        }
-        return "";
+    // Extract (nodeId, values) from A2A params for the `start` method.
+    const extractStartArgs = (params) => {
+        const nodeId = typeof params.nodeId === "string" && params.nodeId.length > 0
+            ? params.nodeId
+            : undefined;
+        const rawValues = params.values;
+        const values = rawValues && typeof rawValues === "object" && !Array.isArray(rawValues)
+            ? rawValues
+            : {};
+        return { nodeId, values };
     };
     // POST /a2a — JSON-RPC 2.0
     app.post("/a2a", async (req, reply) => {
@@ -191,24 +188,19 @@ export async function createAgentServer(options = {}) {
         }
         try {
             let result;
-            if (workflowEngine && body.method === "widget_trigger") {
-                // Reactive re-execution from a widget interaction.
-                const params = body.params ?? {};
-                const nodeId = typeof params.nodeId === "string" ? params.nodeId : "";
-                const portValues = params.portValues ?? {};
-                if (!nodeId) {
-                    throw new Error("widget_trigger: missing nodeId");
+            if (workflowEngine) {
+                if (body.method !== "start") {
+                    return reply.send({
+                        jsonrpc: "2.0",
+                        id: body.id,
+                        error: {
+                            code: A2A_ERROR_CODES.INVALID_PARAMS,
+                            message: `Unknown method "${body.method}". Only "start" is supported.`,
+                        },
+                    });
                 }
-                const run = await workflowEngine.triggerFromNode(nodeId, portValues);
-                result = {
-                    content: run.content,
-                    messages: run.messages,
-                    nodeOutputs: run.nodeOutputs,
-                };
-            }
-            else if (workflowEngine) {
-                const msg = extractMessage(body.params ?? {});
-                const run = await workflowEngine.run(msg);
+                const { nodeId, values } = extractStartArgs(body.params ?? {});
+                const run = await workflowEngine.start(nodeId, values);
                 result = {
                     content: run.content,
                     messages: run.messages,
@@ -276,18 +268,11 @@ export async function createAgentServer(options = {}) {
                 const { type, ...rest } = event;
                 writeEvent(type, rest);
             };
-            if (body.method === "widget_trigger") {
-                const params = body.params ?? {};
-                const nodeId = typeof params.nodeId === "string" ? params.nodeId : "";
-                const portValues = params.portValues ?? {};
-                if (!nodeId)
-                    throw new Error("widget_trigger: missing nodeId");
-                await workflowEngine.triggerFromNode(nodeId, portValues, { onEvent });
+            if (body.method && body.method !== "start") {
+                throw new Error(`Unknown method "${body.method}". Only "start" is supported.`);
             }
-            else {
-                const msg = extractMessage(body.params ?? {});
-                await workflowEngine.run(msg, { onEvent });
-            }
+            const { nodeId, values } = extractStartArgs(body.params ?? {});
+            await workflowEngine.start(nodeId, values, { onEvent });
         }
         catch (err) {
             const message = err instanceof Error ? err.message : "Internal error";

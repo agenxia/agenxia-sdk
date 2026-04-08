@@ -4,6 +4,83 @@ All notable changes to `@agenxia/sdk`.
 
 ## [2.0.0] - 2026-04-09
 
+### BREAKING — unified `start(nodeId?, values?)` API
+
+The old `run(message)` / `triggerFromNode(nodeId, portValues)` split on the
+engine and the matching `chat` / `widget_trigger` methods on the A2A server
+are gone. They were two names for the same operation: "execute a workflow
+starting from a node with some initial values". The new API collapses both
+into a single primitive.
+
+**Engine:**
+
+```ts
+engine.start(nodeId?: string, values?: Record<string, unknown>, options?: StartOptions)
+```
+
+- `nodeId` defaults to `workflow.entrypoint`.
+- `values` are merged on top of the computed inputs of the start node
+  (upstream cached outputs via `resolveInputs`, then `values` on top).
+- The start node **is** executed (unlike the old `triggerFromNode` which
+  only mutated its cached output). Its module/passthrough runs with the
+  merged inputs and produces a fresh output.
+- Only the start node and its descendants are re-executed. Nodes outside
+  the descendant subgraph keep their cached outputs from `lastOutputs`.
+- On the first call `lastOutputs` is empty — the scheduler simply skips
+  descendants whose upstream dependencies are unresolved.
+- `lastOutputs` is updated with the new outputs of executed nodes.
+
+Removed:
+- `WorkflowEngine.run(message, options)`
+- `WorkflowEngine.triggerFromNode(nodeId, portValues, options)`
+- `WorkflowRunOptions`, `WorkflowTriggerOptions` types
+- Internal `_runFull` / `_triggerFromNode` / `hasRun` flag
+
+Added:
+- `StartOptions` type (replaces the two old option types)
+
+**A2A server:**
+
+```json
+POST /a2a
+{ "jsonrpc": "2.0", "id": 1, "method": "start",
+  "params": { "nodeId": "wf_node_...", "values": { "message": "..." } } }
+```
+
+`nodeId` and `values` are both optional. Unknown methods return
+`-32602 Invalid params`. The streaming endpoint `/a2a/stream` accepts
+the same method/params.
+
+Removed:
+- A2A method `chat` (replaced by `start` with `values.message`)
+- A2A method `widget_trigger` (replaced by `start` with `nodeId` + `values`)
+
+**Rationale:** an agent is a generic workflow executor, not a chatbot. A
+workflow that happens to contain an `agent-core` node calling a LLM is a
+detail of the workflow graph, not a feature of the agent API. The old
+`chat` method presupposed conversational semantics at the wrong layer.
+
+**Migration:**
+
+```diff
+- await engine.run("hello")
++ await engine.start(undefined, { message: "hello" })
+
+- await engine.triggerFromNode("widget-id", { selection: {...} })
++ await engine.start("widget-id", { selection: {...} })
+
+- curl -d '{"jsonrpc":"2.0","id":1,"method":"chat","params":{"message":"hi"}}'
++ curl -d '{"jsonrpc":"2.0","id":1,"method":"start","params":{"values":{"message":"hi"}}}'
+
+- curl -d '{"jsonrpc":"2.0","id":1,"method":"widget_trigger","params":{"nodeId":"w","portValues":{"selection":{...}}}}'
++ curl -d '{"jsonrpc":"2.0","id":1,"method":"start","params":{"nodeId":"w","values":{"selection":{...}}}}'
+```
+
+Conversational workflows continue to work unchanged as long as their edge
+leaving the entrypoint (or wherever `message` is produced) uses
+`sourceHandle: "message"` and downstream nodes read `inputs.message` — the
+standard convention used by the visual editor.
+
 ### BREAKING — `resolveInputs` now routes data by port handles
 
 Edges with `sourceHandle` and `targetHandle` now transmit only the named

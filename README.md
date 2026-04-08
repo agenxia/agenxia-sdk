@@ -1,8 +1,10 @@
 # @agenxia/sdk
 
-Declarative agent runtime. Embed a workflow engine in your agent, expose it
-via A2A (JSON-RPC 2.0), stream execution events over SSE, and let interactive
-widgets drive reactive re-execution of downstream nodes.
+Declarative agent runtime. An agent is a **generic workflow executor**:
+you ship a `workflow.json`, the SDK exposes it over a single A2A endpoint,
+streams execution events over SSE, and lets interactive widgets drive
+reactive re-execution of downstream nodes — without re-running upstream
+connectors.
 
 ## Install
 
@@ -23,15 +25,23 @@ automatically at startup.
 
 ## A2A protocol
 
-### `chat` — classic workflow run
+The agent exposes **one JSON-RPC method**: `start`. It runs the workflow
+from a given node with a given set of values. That's it — no `chat`, no
+`widget_trigger`. Conversational workflows and widget interactions are
+conventions layered on top, not features of the API.
+
+### `start` — execute a workflow
 
 ```json
 POST /a2a
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "method": "chat",
-  "params": { "message": "Bonjour" }
+  "method": "start",
+  "params": {
+    "nodeId": "wf_node_abc",          // optional, defaults to workflow.entrypoint
+    "values": { "message": "Bonjour" } // optional, merged into start node inputs
+  }
 }
 ```
 
@@ -49,40 +59,47 @@ Response:
 }
 ```
 
-### `widget_trigger` — reactive re-execution from a widget interaction
+**Semantics:**
 
-When an interactive widget (calendar, form, picker…) emits new values on its
-output ports, the frontend sends a `widget_trigger` request. The engine
-merges `portValues` into the widget's cached output and re-executes **only
-the downstream subgraph**. Upstream connectors (fetch, DB query, LLM) keep
-their cached outputs and are never re-run.
+- `nodeId` defaults to `workflow.entrypoint`. Must exist in the workflow
+  or the server returns `-32602 Invalid params`.
+- `values` is merged on top of the start node's computed inputs (upstream
+  cached outputs routed via `resolveInputs`, then `values` on top).
+- The start node runs its module (or passthrough) with the merged inputs.
+- Only the start node and its descendants are (re-)executed. Everything
+  else keeps its cached output from the previous `start` call.
+- On the first call, the cache is empty — descendants with unresolved
+  upstream dependencies are skipped by the scheduler.
+
+**Conversational workflows** are just workflows where a user message
+happens to drive execution. The client calls `start` with
+`values: { message: "..." }` and the workflow's edges forward the message
+to wherever it's needed (typically an `agent-core` node via
+`sourceHandle: "message" → targetHandle: "message"` routing).
 
 ```json
-POST /a2a
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "widget_trigger",
-  "params": {
-    "nodeId": "widget-calendar-1",
-    "portValues": { "selection": { "date": "2026-04-09" } }
-  }
-}
+// Conversational convention
+{ "method": "start", "params": { "values": { "message": "Bonjour" } } }
 ```
 
-Preconditions:
+**Widget interactions** are just workflows where the user clicks
+something in a UI node and that click needs to propagate downstream. The
+client calls `start` with `nodeId` set to the widget and `values` set to
+the new port values the user produced.
 
-- At least one `chat` (or equivalent `run()`) must have executed before —
-  the engine needs the warmed output cache to resolve inputs for descendants
-  whose other predecessors live upstream of the widget.
-- `nodeId` must exist in `workflow.json`.
+```json
+// Widget click convention
+{ "method": "start",
+  "params": { "nodeId": "widget-calendar-1",
+              "values": { "selection": { "date": "2026-04-09" } } } }
+```
 
-The response shape is identical to `chat`: `{ content, messages, nodeOutputs }`.
+Upstream connectors (fetch ICS, DB query, LLM call) keep their cached
+outputs from the initial run and are not re-executed.
 
 ### Streaming — `POST /a2a/stream`
 
-Same body as `/a2a`, returns `text/event-stream`. Works for both `chat` and
-`widget_trigger`. Events emitted:
+Same body as `/a2a`, returns `text/event-stream`. Events emitted:
 
 ```
 event: node_start
@@ -98,8 +115,8 @@ event: workflow_complete
 data: { "content": "...", "messages": [...], "nodeOutputs": {...} }
 ```
 
-For `widget_trigger`, events are scoped to the re-executed subgraph: the
-source widget node and all out-of-subgraph nodes stay silent.
+When `start` is called with a widget `nodeId`, events are scoped to the
+re-executed subgraph: nodes outside the descendant subgraph stay silent.
 
 ## Programmatic API
 
@@ -110,14 +127,17 @@ const engine = createWorkflowEngine({
   workflowPath: "./workflow.json",
   modulesDir: "./modules",
   manifest: { name: "my-agent" },
-  // llm: optional
+  // llm: optional, passed to modules via context.llm
 });
 
-// Full run
-const r1 = await engine.run("Bonjour");
+// Initial run from the entrypoint (no nodeId, no values)
+await engine.start();
 
-// Reactive trigger from a widget
-const r2 = await engine.triggerFromNode("widget-calendar-1", {
+// Conversational run: inject a message
+await engine.start(undefined, { message: "Bonjour" });
+
+// Widget click: re-run only the widget + its descendants
+await engine.start("widget-calendar-1", {
   selection: { date: "2026-04-09" },
 });
 
@@ -128,7 +148,7 @@ const cache = engine.getLastOutputs();
 ### Streaming from code
 
 ```ts
-await engine.run("Bonjour", {
+await engine.start(undefined, { message: "Bonjour" }, {
   onEvent: (event) => {
     console.log(event.type, event);
   },
@@ -214,22 +234,28 @@ inputs. This is the default for UI widgets.
 A typical interactive-widget workflow looks like this:
 
 ```
-[Fetch ICS] → [widget-calendar] → [widget-selector] → [Display]
+[Fetch ICS] → [widget-calendar] → [Display]
+        events → events            selection → output-in
 ```
 
-1. First `chat` run: `Fetch ICS` hits the network, `widget-calendar` is a
-   passthrough that receives `{ events: [...] }`, downstream nodes see the
-   events list. The user gets an initial UI rendering.
-2. User clicks a date in the calendar. Frontend sends:
+1. **Initial call**: client sends `start()` (no args). `Fetch ICS` hits the
+   network, `widget-calendar` is a passthrough that receives
+   `{ events: [...] }`, `Display` receives `{ "output-in": undefined }`
+   (the user has not clicked yet). The UI renders an empty selection.
+2. **User clicks a date** in the calendar. The frontend sends:
    ```json
-   { "method": "widget_trigger",
+   { "method": "start",
      "params": { "nodeId": "widget-calendar",
-                 "portValues": { "selection": { "date": "2026-04-09" } } } }
+                 "values": { "selection": { "date": "2026-04-09" } } } }
    ```
-3. Engine merges `{ selection: {...} }` into the cached output of
-   `widget-calendar` (preserving `events: [...]`), then re-executes only
-   `widget-selector` and `Display`. `Fetch ICS` stays cached.
-4. Subsequent clicks (10, 100, 1000…) cost exactly one downstream re-run
+3. The engine builds `widget-calendar`'s inputs from its cached upstream
+   (`{ events: [...] }`) and merges `values` on top
+   (`{ events: [...], selection: {...} }`). The widget passthrough runs
+   and returns both keys. Port routing then forwards only the
+   `selection` field to `Display` under the name `output-in`.
+4. `Display` re-runs with `{ "output-in": { date: "2026-04-09" } }`.
+   `Fetch ICS` **does not** re-run — it stays cached.
+5. Subsequent clicks (10, 100, 1000…) cost exactly one downstream re-run
    each. `Fetch ICS` runs exactly once for the entire session.
 
 ## License
