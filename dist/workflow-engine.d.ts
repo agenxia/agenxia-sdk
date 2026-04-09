@@ -83,6 +83,7 @@ export declare class WorkflowEngine {
     private readonly moduleCache;
     private readonly history;
     private lastOutputs;
+    private lastContent;
     private runLock;
     constructor(workflow: WorkflowDefinition, options: {
         modulesDir: string;
@@ -92,6 +93,12 @@ export declare class WorkflowEngine {
     getHistory(): ChatHistoryMessage[];
     /** Snapshot of the last known outputs for every executed node. */
     getLastOutputs(): Record<string, unknown>;
+    /**
+     * Read-only snapshot of the engine's current state. Pure getter — no
+     * execution, no mutation. Before any start() has run, returns empty
+     * content, empty messages, and empty nodeOutputs.
+     */
+    getState(): WorkflowRunResult;
     private withLock;
     /**
      * Execute the workflow from a specific node.

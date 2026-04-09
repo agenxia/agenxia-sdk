@@ -251,13 +251,23 @@ export async function createAgentServer(
     try {
       let result: A2AResult;
       if (workflowEngine) {
+        if (body.method === "state") {
+          // Pure getter — no execution, no mutation.
+          const snap = workflowEngine.getState();
+          result = {
+            content: snap.content,
+            messages: snap.messages,
+            nodeOutputs: snap.nodeOutputs,
+          } as unknown as A2AResult;
+          return reply.send({ jsonrpc: "2.0", id: body.id, result });
+        }
         if (body.method !== "start") {
           return reply.send({
             jsonrpc: "2.0",
             id: body.id,
             error: {
               code: A2A_ERROR_CODES.INVALID_PARAMS,
-              message: `Unknown method "${body.method}". Only "start" is supported.`,
+              message: `Unknown method "${body.method}". Supported: "start", "state".`,
             },
           });
         }

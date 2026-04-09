@@ -398,6 +398,53 @@ test("start(unknownNodeId) throws", async () => {
 // -----------------------------------------------------------------------------
 // 9. Legacy edges without handles still work via full-output merge.
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// 10. getState() — pure getter, no execution. Empty before first start().
+// -----------------------------------------------------------------------------
+test("getState() returns empty snapshot before first start, last state after", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => {
+      __calls.A = (__calls.A || 0) + 1;
+      return { response: "hello" };
+    };`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [{ id: "A", data: { moduleId: "A" } }],
+      edges: [],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "tstate" } },
+  );
+
+  // Before any start(): empty state, no execution.
+  const empty = engine.getState();
+  assert.equal(empty.content, "");
+  assert.deepEqual(empty.messages, []);
+  assert.deepEqual(empty.nodeOutputs, {});
+  assert.equal(h.calls.A ?? 0, 0, "getState must not execute A");
+
+  // After a start(): state is populated.
+  await engine.start();
+  assert.equal(h.calls.A, 1);
+
+  const s = engine.getState();
+  assert.equal(s.content, "hello");
+  assert.deepEqual(s.nodeOutputs, { A: { response: "hello" } });
+
+  // Calling getState() again must not re-execute.
+  engine.getState();
+  engine.getState();
+  assert.equal(
+    h.calls.A,
+    1,
+    "getState must not re-execute on subsequent calls",
+  );
+
+  h.cleanup();
+});
+
 test("legacy edges without handles fall back to full-output merge", async () => {
   const h = makeHarness({
     A: `module.exports = async () => ({ a: 1, b: 2 });`,

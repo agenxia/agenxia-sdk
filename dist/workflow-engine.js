@@ -172,6 +172,9 @@ export class WorkflowEngine {
     // new outputs of executed nodes; nodes outside the subgraph keep
     // their previous values untouched.
     lastOutputs = new Map();
+    // Last extracted content (response/content/message from the most
+    // recent start()). Empty string before any execution.
+    lastContent = "";
     // Mutex: serialize concurrent start() calls to prevent interleaved
     // mutations of lastOutputs.
     runLock = Promise.resolve();
@@ -190,6 +193,18 @@ export class WorkflowEngine {
         for (const [id, v] of this.lastOutputs)
             out[id] = v;
         return out;
+    }
+    /**
+     * Read-only snapshot of the engine's current state. Pure getter — no
+     * execution, no mutation. Before any start() has run, returns empty
+     * content, empty messages, and empty nodeOutputs.
+     */
+    getState() {
+        return {
+            content: this.lastContent,
+            messages: [...this.history],
+            nodeOutputs: this.getLastOutputs(),
+        };
     }
     async withLock(fn) {
         const prev = this.runLock;
@@ -281,11 +296,13 @@ export class WorkflowEngine {
         const content = this.extractContent(outputs, adjacency, executionOrder);
         console.log(`[workflow] start from ${startId} complete — executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
         // Commit new outputs to the persistent cache. Non-subgraph nodes
-        // keep their previous value.
+        // keep their previous value. Also remember the extracted content
+        // so getState() can serve it without re-running anything.
         for (const id of subgraph) {
             if (outputs.has(id))
                 this.lastOutputs.set(id, outputs.get(id));
         }
+        this.lastContent = content;
         const nodeOutputs = {};
         for (const [id, v] of this.lastOutputs)
             nodeOutputs[id] = v;

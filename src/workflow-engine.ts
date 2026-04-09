@@ -334,6 +334,10 @@ export class WorkflowEngine {
   // their previous values untouched.
   private lastOutputs: Map<string, unknown> = new Map();
 
+  // Last extracted content (response/content/message from the most
+  // recent start()). Empty string before any execution.
+  private lastContent = "";
+
   // Mutex: serialize concurrent start() calls to prevent interleaved
   // mutations of lastOutputs.
   private runLock: Promise<unknown> = Promise.resolve();
@@ -361,6 +365,19 @@ export class WorkflowEngine {
     const out: Record<string, unknown> = {};
     for (const [id, v] of this.lastOutputs) out[id] = v;
     return out;
+  }
+
+  /**
+   * Read-only snapshot of the engine's current state. Pure getter — no
+   * execution, no mutation. Before any start() has run, returns empty
+   * content, empty messages, and empty nodeOutputs.
+   */
+  getState(): WorkflowRunResult {
+    return {
+      content: this.lastContent,
+      messages: [...this.history],
+      nodeOutputs: this.getLastOutputs(),
+    };
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -472,10 +489,12 @@ export class WorkflowEngine {
     );
 
     // Commit new outputs to the persistent cache. Non-subgraph nodes
-    // keep their previous value.
+    // keep their previous value. Also remember the extracted content
+    // so getState() can serve it without re-running anything.
     for (const id of subgraph) {
       if (outputs.has(id)) this.lastOutputs.set(id, outputs.get(id));
     }
+    this.lastContent = content;
 
     const nodeOutputs: Record<string, unknown> = {};
     for (const [id, v] of this.lastOutputs) nodeOutputs[id] = v;
