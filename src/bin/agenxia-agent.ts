@@ -14,11 +14,10 @@ function getArg(name: string): string | undefined {
   return idx !== -1 ? args[idx + 1] : undefined;
 }
 
-const processPath = getArg("process");
 const manifestPath = getArg("manifest");
 const port = getArg("port") ? parseInt(getArg("port")!, 10) : undefined;
 
-createAgentServer({ processPath, manifestPath, port }).catch((err) => {
+createAgentServer({ manifestPath, port }).catch((err) => {
   console.error("Failed to start agent:", err);
   process.exit(1);
 });

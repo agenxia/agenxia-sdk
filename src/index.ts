@@ -1,11 +1,7 @@
 // @agenxia/sdk — barrel export
 
 export { createAgentServer } from "./server.js";
-export type {
-  ServerOptions,
-  ProcessContext,
-  ProcessFunction,
-} from "./server.js";
+export type { ServerOptions } from "./server.js";
 export {
   WorkflowEngine,
   createWorkflowEngine,

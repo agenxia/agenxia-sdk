@@ -1,7 +1,6 @@
 // Main agent server factory
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { A2A_ERROR_CODES } from "./a2a/types.js";
@@ -40,14 +39,12 @@ function findLLMParams(def) {
  * Create and start the agent server.
  *
  * 1. Reads agenxia.json
- * 2. Imports process.js (if it exists)
+ * 2. Loads workflow.json + LLM config
  * 3. Mounts routes: /health, /.well-known/agent-card.json, /docs, /a2a
- * 4. Creates LLM client if config has LLM settings
- * 5. Starts the Fastify server
+ * 4. Starts the Fastify server
  */
 export async function createAgentServer(options = {}) {
     const manifestPath = resolve(options.manifestPath ?? "./agenxia.json");
-    const processPath = resolve(options.processPath ?? "./process.js");
     const port = options.port ?? parseInt(process.env.PORT ?? "3000", 10);
     const host = options.host ?? "0.0.0.0";
     // 1. Read manifest
@@ -60,16 +57,7 @@ export async function createAgentServer(options = {}) {
         console.warn(`Warning: Could not read ${manifestPath}, using defaults`);
         manifest = { name: "unknown-agent", description: "No manifest found" };
     }
-    // 2. Import process function
-    let processFunc = null;
-    try {
-        const mod = (await import(pathToFileURL(processPath).href));
-        processFunc = mod.default ?? mod.process ?? null;
-    }
-    catch {
-        console.warn(`Warning: Could not import ${processPath}`);
-    }
-    // 3. Load workflow.json — it is the source of truth for module params,
+    // 2. Load workflow.json — it is the source of truth for module params,
     //    including LLM config. agenxia.json is reserved for external identity.
     const { workflowPath, modulesDir } = defaultWorkflowPaths(manifestPath);
     const workflowDef = loadWorkflowDefinition(workflowPath);
@@ -176,61 +164,44 @@ export async function createAgentServer(options = {}) {
                 },
             });
         }
-        if (!workflowEngine && !processFunc) {
+        if (!workflowEngine) {
             return reply.send({
                 jsonrpc: "2.0",
                 id: body.id,
                 error: {
                     code: A2A_ERROR_CODES.INTERNAL_ERROR,
-                    message: "No workflow.json and no process function loaded",
+                    message: "No workflow.json found",
                 },
             });
         }
         try {
             let result;
-            if (workflowEngine) {
-                if (body.method === "state") {
-                    // Pure getter — no execution, no mutation.
-                    const snap = workflowEngine.getState();
-                    result = {
-                        content: snap.content,
-                        messages: snap.messages,
-                        nodeOutputs: snap.nodeOutputs,
-                    };
-                    return reply.send({ jsonrpc: "2.0", id: body.id, result });
-                }
-                if (body.method !== "start") {
-                    return reply.send({
-                        jsonrpc: "2.0",
-                        id: body.id,
-                        error: {
-                            code: A2A_ERROR_CODES.INVALID_PARAMS,
-                            message: `Unknown method "${body.method}". Supported: "start", "state".`,
-                        },
-                    });
-                }
-                const { nodeId, values } = extractStartArgs(body.params ?? {});
-                const run = await workflowEngine.start(nodeId, values);
+            if (body.method === "state") {
+                const snap = workflowEngine.getState();
                 result = {
-                    content: run.content,
-                    messages: run.messages,
-                    nodeOutputs: run.nodeOutputs,
+                    content: snap.content,
+                    messages: snap.messages,
+                    nodeOutputs: snap.nodeOutputs,
                 };
+                return reply.send({ jsonrpc: "2.0", id: body.id, result });
             }
-            else if (processFunc) {
-                result = await processFunc({
-                    manifest,
-                    llm,
-                    params: body.params ?? {},
-                    method: body.method,
-                    callerId,
-                    depth,
-                    requestId,
+            if (body.method !== "start") {
+                return reply.send({
+                    jsonrpc: "2.0",
+                    id: body.id,
+                    error: {
+                        code: A2A_ERROR_CODES.INVALID_PARAMS,
+                        message: `Unknown method "${body.method}". Supported: "start", "state".`,
+                    },
                 });
             }
-            else {
-                throw new Error("No executor available");
-            }
+            const { nodeId, values } = extractStartArgs(body.params ?? {});
+            const run = await workflowEngine.start(nodeId, values);
+            result = {
+                content: run.content,
+                messages: run.messages,
+                nodeOutputs: run.nodeOutputs,
+            };
             return reply.send({ jsonrpc: "2.0", id: body.id, result });
         }
         catch (err) {
