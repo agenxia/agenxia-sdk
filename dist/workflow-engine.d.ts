@@ -75,6 +75,23 @@ export type WorkflowEventHandler = (event: WorkflowEvent) => void;
 export interface StartOptions {
     onEvent?: WorkflowEventHandler;
 }
+/**
+ * Build a label-keyed view of `inputs` using `node.data.ports.inputs`
+ * (label ↔ id mapping). The original id-keyed entries are preserved
+ * so callers that reference ports by id still resolve correctly.
+ * Used internally for placeholder interpolation only — the module
+ * itself keeps receiving the untouched `inputs`.
+ */
+export declare function buildNamedInputs(node: WorkflowNode, inputs: Record<string, unknown>): Record<string, unknown>;
+/**
+ * Replace `{{name}}` placeholders in every string field of `params`
+ * with the matching value from `view`. Object / array inputs are
+ * stringified via JSON.stringify(value, null, 2). Missing keys become
+ * an empty string. Placeholder syntax: `{{ name }}` with optional
+ * whitespace around the name. Recursive over nested objects / arrays.
+ * Non-string leaves (numbers, booleans) are passed through untouched.
+ */
+export declare function interpolateParams(params: Record<string, unknown>, view: Record<string, unknown>): Record<string, unknown>;
 export declare class WorkflowEngine {
     private readonly workflow;
     private readonly modulesDir;

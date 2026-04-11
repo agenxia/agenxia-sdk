@@ -108,6 +108,71 @@ function resolveInputs(nodeId, reverseAdj, outputs, executed) {
     return result;
 }
 // ---------------------------------------------------------------------------
+// Params interpolation — resolves `{{name}}` placeholders in a node's
+// config against the node's inputs, keyed by port LABEL (what the user
+// sees in the editor) rather than port ID (auto-generated, opaque).
+// ---------------------------------------------------------------------------
+/**
+ * Build a label-keyed view of `inputs` using `node.data.ports.inputs`
+ * (label ↔ id mapping). The original id-keyed entries are preserved
+ * so callers that reference ports by id still resolve correctly.
+ * Used internally for placeholder interpolation only — the module
+ * itself keeps receiving the untouched `inputs`.
+ */
+export function buildNamedInputs(node, inputs) {
+    const ports = node.data?.ports?.inputs ?? [];
+    const out = { ...inputs };
+    for (const port of ports) {
+        if (!port?.id)
+            continue;
+        const label = port.label?.trim();
+        if (label && !(label in out)) {
+            out[label] = inputs[port.id];
+        }
+    }
+    return out;
+}
+/**
+ * Replace `{{name}}` placeholders in every string field of `params`
+ * with the matching value from `view`. Object / array inputs are
+ * stringified via JSON.stringify(value, null, 2). Missing keys become
+ * an empty string. Placeholder syntax: `{{ name }}` with optional
+ * whitespace around the name. Recursive over nested objects / arrays.
+ * Non-string leaves (numbers, booleans) are passed through untouched.
+ */
+export function interpolateParams(params, view) {
+    const placeholder = /\{\{\s*([^\s{}]+(?:\s+[^\s{}]+)*)\s*\}\}/g;
+    const render = (val) => {
+        if (typeof val === "string") {
+            if (!val.includes("{{"))
+                return val;
+            return val.replace(placeholder, (_m, key) => {
+                const v = view[key];
+                if (v == null)
+                    return "";
+                if (typeof v === "string")
+                    return v;
+                try {
+                    return JSON.stringify(v, null, 2);
+                }
+                catch {
+                    return String(v);
+                }
+            });
+        }
+        if (Array.isArray(val))
+            return val.map(render);
+        if (val && typeof val === "object") {
+            const obj = {};
+            for (const [k, v] of Object.entries(val))
+                obj[k] = render(v);
+            return obj;
+        }
+        return val;
+    };
+    return render(params);
+}
+// ---------------------------------------------------------------------------
 // Module loader
 // ---------------------------------------------------------------------------
 // Load modules/<id>/execute.js files that use CommonJS
@@ -420,7 +485,9 @@ export class WorkflowEngine {
             fn = await loadModule(this.modulesDir, moduleId);
             this.moduleCache.set(moduleId, fn);
         }
-        const params = node.data?.config ?? {};
+        const rawParams = node.data?.config ?? {};
+        const namedInputs = buildNamedInputs(node, inputs);
+        const params = interpolateParams(rawParams, namedInputs);
         const context = {
             manifest: this.manifest,
             llm: this.llm,
