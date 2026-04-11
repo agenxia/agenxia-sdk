@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 // CLI entry point for running an agent
-// Load .env from the current working directory before anything else so
-// LLM_API_URL / LLM_API_KEY / custom env vars are available to the server.
-import "dotenv/config";
+// Note: .env loading is handled by server.ts (via dotenv/config).
 import { createAgentServer } from "../server.js";
 const args = process.argv.slice(2);
 function getArg(name) {

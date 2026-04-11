@@ -1,4 +1,9 @@
 // Main agent server factory
+// Load .env from the agent's cwd before any process.env reads so that
+// agents importing createAgentServer directly (not via the CLI) get
+// their .env vars automatically. dotenv is idempotent — if .env was
+// already loaded by the CLI or the agent itself, this is a no-op.
+import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import Fastify from "fastify";
@@ -263,6 +268,31 @@ export async function createAgentServer(options = {}) {
             if (!closed && !reply.raw.destroyed)
                 reply.raw.end();
         }
+    });
+    // POST /api/sync — synchronize agent code via git pull
+    app.post("/api/sync", async (_request, reply) => {
+        const { spawnSync } = await import("node:child_process");
+        const cwd = rootDir;
+        // Verifier qu'on est dans un repo git
+        const check = spawnSync("git", ["rev-parse", "--git-dir"], {
+            cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        if (check.status !== 0) {
+            return reply.code(400).send({ error: "Not a git repository" });
+        }
+        const pull = spawnSync("git", ["pull", "origin", "main", "--ff-only"], {
+            cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        const output = (pull.stdout + pull.stderr).trim();
+        console.log(`[sync] git pull: ${output}`);
+        if (pull.status !== 0) {
+            return reply.code(500).send({ error: "git pull failed", output });
+        }
+        return reply.send({ synced: true, output });
     });
     // 6. Start server
     await app.listen({ port, host });
