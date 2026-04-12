@@ -201,6 +201,11 @@ export async function createAgentServer(options = {}) {
                 });
             }
             const { nodeId, values } = extractStartArgs(body.params ?? {});
+            workflowEngine.setRequestContext({
+                sessionId: req.headers["x-session-id"],
+                agentId: req.headers["x-agent-id"],
+                platformUrl: req.headers["x-platform-url"],
+            });
             const run = await workflowEngine.start(nodeId, values);
             result = {
                 content: run.content,
@@ -258,6 +263,11 @@ export async function createAgentServer(options = {}) {
                 throw new Error(`Unknown method "${body.method}". Only "start" is supported.`);
             }
             const { nodeId, values } = extractStartArgs(body.params ?? {});
+            workflowEngine.setRequestContext({
+                sessionId: req.headers["x-session-id"],
+                agentId: req.headers["x-agent-id"],
+                platformUrl: req.headers["x-platform-url"],
+            });
             await workflowEngine.start(nodeId, values, { onEvent });
         }
         catch (err) {

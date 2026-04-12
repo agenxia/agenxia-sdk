@@ -50,6 +50,9 @@ export interface ModuleContext {
   nodeId: string;
   history?: ChatHistoryMessage[];
   convert: (value: unknown, fromType: PortType, toType: PortType) => unknown;
+  agentId?: string;
+  platformUrl?: string;
+  sessionId?: string;
 }
 
 export type ModuleExecuteFn = (
@@ -398,6 +401,11 @@ export class WorkflowEngine {
   private readonly modulesDir: string;
   private readonly manifest: AgentManifest;
   private readonly llm?: ReturnType<typeof createLLM>;
+  private _requestContext: {
+    agentId?: string;
+    platformUrl?: string;
+    sessionId?: string;
+  } = {};
   private readonly moduleCache = new Map<string, ModuleExecuteFn>();
   private readonly history: ChatHistoryMessage[] = [];
 
@@ -428,6 +436,14 @@ export class WorkflowEngine {
     this.modulesDir = options.modulesDir;
     this.manifest = options.manifest;
     this.llm = options.llm;
+  }
+
+  setRequestContext(ctx: {
+    agentId?: string;
+    platformUrl?: string;
+    sessionId?: string;
+  }): void {
+    this._requestContext = ctx;
   }
 
   getHistory(): ChatHistoryMessage[] {
@@ -753,6 +769,9 @@ export class WorkflowEngine {
       nodeId: node.id,
       history: [...this.history],
       convert,
+      agentId: this._requestContext.agentId,
+      platformUrl: this._requestContext.platformUrl,
+      sessionId: this._requestContext.sessionId,
     };
     console.log(
       `[workflow] exec ${node.id} (module=${moduleId}) inputs={${inputKeys}} hasLLM=${!!this.llm}`,

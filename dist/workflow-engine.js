@@ -230,6 +230,7 @@ export class WorkflowEngine {
     modulesDir;
     manifest;
     llm;
+    _requestContext = {};
     moduleCache = new Map();
     history = [];
     // Persistent output cache across start() calls. Reads: used as
@@ -249,6 +250,9 @@ export class WorkflowEngine {
         this.modulesDir = options.modulesDir;
         this.manifest = options.manifest;
         this.llm = options.llm;
+    }
+    setRequestContext(ctx) {
+        this._requestContext = ctx;
     }
     getHistory() {
         return [...this.history];
@@ -509,6 +513,9 @@ export class WorkflowEngine {
             nodeId: node.id,
             history: [...this.history],
             convert,
+            agentId: this._requestContext.agentId,
+            platformUrl: this._requestContext.platformUrl,
+            sessionId: this._requestContext.sessionId,
         };
         console.log(`[workflow] exec ${node.id} (module=${moduleId}) inputs={${inputKeys}} hasLLM=${!!this.llm}`);
         try {

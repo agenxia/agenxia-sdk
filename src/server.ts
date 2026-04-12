@@ -248,6 +248,11 @@ export async function createAgentServer(
         });
       }
       const { nodeId, values } = extractStartArgs(body.params ?? {});
+      workflowEngine.setRequestContext({
+        sessionId: req.headers["x-session-id"] as string | undefined,
+        agentId: req.headers["x-agent-id"] as string | undefined,
+        platformUrl: req.headers["x-platform-url"] as string | undefined,
+      });
       const run = await workflowEngine.start(nodeId, values);
       result = {
         content: run.content,
@@ -317,6 +322,11 @@ export async function createAgentServer(
         );
       }
       const { nodeId, values } = extractStartArgs(body.params ?? {});
+      workflowEngine.setRequestContext({
+        sessionId: req.headers["x-session-id"] as string | undefined,
+        agentId: req.headers["x-agent-id"] as string | undefined,
+        platformUrl: req.headers["x-platform-url"] as string | undefined,
+      });
       await workflowEngine.start(nodeId, values, { onEvent });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Internal error";

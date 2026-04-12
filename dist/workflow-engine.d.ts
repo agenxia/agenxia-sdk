@@ -33,6 +33,9 @@ export interface ModuleContext {
     nodeId: string;
     history?: ChatHistoryMessage[];
     convert: (value: unknown, fromType: PortType, toType: PortType) => unknown;
+    agentId?: string;
+    platformUrl?: string;
+    sessionId?: string;
 }
 export type ModuleExecuteFn = (inputs: Record<string, unknown>, params: Record<string, unknown>, context: ModuleContext) => Promise<Record<string, unknown> | unknown> | Record<string, unknown> | unknown;
 export interface WorkflowEngineOptions {
@@ -99,6 +102,7 @@ export declare class WorkflowEngine {
     private readonly modulesDir;
     private readonly manifest;
     private readonly llm?;
+    private _requestContext;
     private readonly moduleCache;
     private readonly history;
     private lastOutputs;
@@ -109,6 +113,11 @@ export declare class WorkflowEngine {
         manifest: AgentManifest;
         llm?: ReturnType<typeof createLLM>;
     });
+    setRequestContext(ctx: {
+        agentId?: string;
+        platformUrl?: string;
+        sessionId?: string;
+    }): void;
     getHistory(): ChatHistoryMessage[];
     /** Snapshot of the last known outputs for every executed node. */
     getLastOutputs(): Record<string, unknown>;
