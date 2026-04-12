@@ -1,5 +1,6 @@
 import type { AgentManifest } from "./types.js";
 import type { createLLM } from "./llm.js";
+import { type PortType } from "./convert.js";
 export interface WorkflowNode {
     id: string;
     type?: string;
@@ -31,6 +32,7 @@ export interface ModuleContext {
     llm?: ReturnType<typeof createLLM>;
     nodeId: string;
     history?: ChatHistoryMessage[];
+    convert: (value: unknown, fromType: PortType, toType: PortType) => unknown;
 }
 export type ModuleExecuteFn = (inputs: Record<string, unknown>, params: Record<string, unknown>, context: ModuleContext) => Promise<Record<string, unknown> | unknown> | Record<string, unknown> | unknown;
 export interface WorkflowEngineOptions {

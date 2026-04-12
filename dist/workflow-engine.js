@@ -5,6 +5,7 @@
 // A module without execute.js is treated as passthrough.
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
+import { convert } from "./convert.js";
 function buildGraph(nodes, edges) {
     const nodeMap = new Map();
     const adjacency = new Map();
@@ -475,6 +476,20 @@ export class WorkflowEngine {
     }
     async executeNode(node, inputs) {
         const moduleId = node.data?.moduleId;
+        // Seed default values from input ports that carry a `value` field
+        // (set by the editor UI) when no upstream edge has provided one.
+        // This lets ports act as constant inputs without requiring a
+        // dedicated "literal" source node wired in.
+        const inputPorts = node.data?.ports?.inputs ?? [];
+        for (const port of inputPorts) {
+            if (!port?.id)
+                continue;
+            if (port.value === undefined)
+                continue;
+            if (inputs[port.id] === undefined) {
+                inputs[port.id] = port.value;
+            }
+        }
         const inputKeys = Object.keys(inputs).join(",") || "(none)";
         if (!moduleId) {
             console.log(`[workflow] exec ${node.id} (passthrough) inputs={${inputKeys}}`);
@@ -493,6 +508,7 @@ export class WorkflowEngine {
             llm: this.llm,
             nodeId: node.id,
             history: [...this.history],
+            convert,
         };
         console.log(`[workflow] exec ${node.id} (module=${moduleId}) inputs={${inputKeys}} hasLLM=${!!this.llm}`);
         try {

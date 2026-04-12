@@ -8,6 +8,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import type { AgentManifest } from "./types.js";
 import type { createLLM } from "./llm.js";
+import { convert, type PortType } from "./convert.js";
 
 // ---------------------------------------------------------------------------
 // Workflow types
@@ -48,6 +49,7 @@ export interface ModuleContext {
   llm?: ReturnType<typeof createLLM>;
   nodeId: string;
   history?: ChatHistoryMessage[];
+  convert: (value: unknown, fromType: PortType, toType: PortType) => unknown;
 }
 
 export type ModuleExecuteFn = (
@@ -709,6 +711,25 @@ export class WorkflowEngine {
     inputs: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     const moduleId = node.data?.moduleId;
+
+    // Seed default values from input ports that carry a `value` field
+    // (set by the editor UI) when no upstream edge has provided one.
+    // This lets ports act as constant inputs without requiring a
+    // dedicated "literal" source node wired in.
+    const inputPorts =
+      (
+        node.data?.ports as
+          | { inputs?: Array<{ id?: string; value?: unknown }> }
+          | undefined
+      )?.inputs ?? [];
+    for (const port of inputPorts) {
+      if (!port?.id) continue;
+      if (port.value === undefined) continue;
+      if (inputs[port.id] === undefined) {
+        inputs[port.id] = port.value;
+      }
+    }
+
     const inputKeys = Object.keys(inputs).join(",") || "(none)";
     if (!moduleId) {
       console.log(
@@ -731,6 +752,7 @@ export class WorkflowEngine {
       llm: this.llm,
       nodeId: node.id,
       history: [...this.history],
+      convert,
     };
     console.log(
       `[workflow] exec ${node.id} (module=${moduleId}) inputs={${inputKeys}} hasLLM=${!!this.llm}`,

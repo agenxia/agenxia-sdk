@@ -21,6 +21,8 @@ export type {
   ModuleExecuteFn,
   ChatHistoryMessage,
 } from "./workflow-engine.js";
+export { convert } from "./convert.js";
+export type { PortType } from "./convert.js";
 export { createLLM } from "./llm.js";
 export type {
   LLMOptions,
