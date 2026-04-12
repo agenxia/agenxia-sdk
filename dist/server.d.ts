@@ -1,3 +1,4 @@
+import "dotenv/config";
 export interface ServerOptions {
     manifestPath?: string;
     port?: number;

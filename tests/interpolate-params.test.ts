@@ -105,3 +105,58 @@ test("interpolateParams whitespace inside braces is tolerated", () => {
   const out = interpolateParams({ p: "{{  news  }}" }, { news: "hi" });
   assert.equal(out.p, "hi");
 });
+
+// ---------------------------------------------------------------------------
+// End-to-end: a workflow that relies on a port default `value` should run
+// the downstream module with that value injected as an input, without any
+// explicit source node wired to the port.
+// ---------------------------------------------------------------------------
+
+import { test as ptest } from "node:test";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WorkflowEngine } from "../dist/workflow-engine.js";
+
+ptest(
+  "engine seeds input port `value` defaults when no edge supplies them",
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wfe-portval-"));
+    const modulesDir = join(dir, "modules");
+    mkdirSync(join(modulesDir, "echo"), { recursive: true });
+    // Module reads inputs.url and echoes it on `response`
+    writeFileSync(
+      join(modulesDir, "echo", "execute.js"),
+      `async function execute(inputs) { return { response: inputs.url || 'MISSING' }; }\nmodule.exports = execute;\n`,
+    );
+    const wf = {
+      entrypoint: "n1",
+      nodes: [
+        {
+          id: "n1",
+          data: {
+            moduleId: "echo",
+            ports: {
+              inputs: [
+                {
+                  id: "url",
+                  label: "URL",
+                  type: "text",
+                  value: "https://example.com/feed.rss",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      edges: [],
+    };
+    const engine = new WorkflowEngine(wf as never, {
+      modulesDir,
+      manifest: { name: "t" } as never,
+    });
+    const result = await engine.start();
+    assert.equal(result.content, "https://example.com/feed.rss");
+    rmSync(dir, { recursive: true, force: true });
+  },
+);
