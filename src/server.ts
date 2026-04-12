@@ -367,6 +367,100 @@ export async function createAgentServer(
     return reply.send({ synced: true, output });
   });
 
+  // -------------------------------------------------------------------------
+  // REST API — platform → agent communication (no JSON-RPC wrapper)
+  // -------------------------------------------------------------------------
+
+  // Helper: set request context headers common to all start paths.
+  const setCtxFromHeaders = (req: {
+    headers: Record<string, unknown>;
+  }): void => {
+    if (!workflowEngine) return;
+    workflowEngine.setRequestContext({
+      sessionId: req.headers["x-session-id"] as string | undefined,
+      agentId: req.headers["x-agent-id"] as string | undefined,
+      platformUrl: req.headers["x-platform-url"] as string | undefined,
+    });
+  };
+
+  // GET /api/state — read-only snapshot, no execution.
+  app.get("/api/state", async (_req, reply) => {
+    if (!workflowEngine) {
+      return reply.code(400).send({ error: "No workflow.json found" });
+    }
+    const snap = workflowEngine.getState();
+    return reply.send({
+      content: snap.content,
+      messages: snap.messages,
+      nodeOutputs: snap.nodeOutputs,
+    });
+  });
+
+  // POST /api/start — execute workflow (buffered response).
+  app.post("/api/start", async (req, reply) => {
+    if (!workflowEngine) {
+      return reply.code(400).send({ error: "No workflow.json found" });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const { nodeId, values } = extractStartArgs(body);
+    setCtxFromHeaders(req);
+    try {
+      const run = await workflowEngine.start(nodeId, values);
+      return reply.send({
+        content: run.content,
+        messages: run.messages,
+        nodeOutputs: run.nodeOutputs,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Internal error";
+      return reply.code(500).send({ error: message });
+    }
+  });
+
+  // POST /api/start/stream — execute workflow with SSE event stream.
+  app.post("/api/start/stream", async (req, reply) => {
+    if (!workflowEngine) {
+      return reply.code(400).send({ error: "No workflow.json found" });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const { nodeId, values } = extractStartArgs(body);
+    setCtxFromHeaders(req);
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Access-Control-Allow-Origin": "*",
+    });
+
+    let closed = false;
+    reply.raw.on("close", () => {
+      closed = true;
+    });
+
+    const writeEvent = (event: string, data: unknown): void => {
+      if (closed || reply.raw.destroyed) return;
+      reply.raw.write(`event: ${event}\n`);
+      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      await workflowEngine.start(nodeId, values, {
+        onEvent: (event) => {
+          const { type, ...rest } = event;
+          writeEvent(type, rest);
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Internal error";
+      writeEvent("error", { message });
+    } finally {
+      if (!closed && !reply.raw.destroyed) reply.raw.end();
+    }
+  });
+
   // 6. Start server
   await app.listen({ port, host });
   console.log(`Agent "${manifest.name}" running on http://${host}:${port}`);
