@@ -5,6 +5,7 @@
 // A module without execute.js is treated as passthrough.
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { convert } from "./convert.js";
 function buildGraph(nodes, edges) {
     const nodeMap = new Map();
@@ -180,12 +181,10 @@ export function interpolateParams(params, view) {
 // (module.exports = function) even when the agent's package.json has
 // "type": "module".
 //
-// Neither import() nor createRequire() work here: Node resolves .js
-// format from the nearest package.json, so a CJS-style file under an
-// ESM package is rejected with "module is not defined".
-//
-// Solution (matches the platform's own runner): read the source, wrap
-// it in a CJS shim, and evaluate with `new Function`.
+// Modules are CJS but the agent is ESM ("type": "module"), so we
+// can't use import() directly. Solution: read the source, wrap it in
+// a CJS shim, and evaluate with `new Function`. A real `require`
+// (via createRequire) is injected so modules can load npm packages.
 function loadModuleSync(modulesDir, moduleId) {
     const execPath = join(modulesDir, moduleId, "execute.js");
     if (!existsSync(execPath)) {
@@ -201,10 +200,8 @@ function loadModuleSync(modulesDir, moduleId) {
       return module.exports;
     `;
         const factory = new Function("require", "fetch", "console", wrapped);
-        const noRequire = (id) => {
-            throw new Error(`require('${id}') not available in module sandbox`);
-        };
-        const exported = factory(noRequire, globalThis.fetch, console);
+        const moduleRequire = createRequire(execPath);
+        const exported = factory(moduleRequire, globalThis.fetch, console);
         if (typeof exported === "function")
             return exported;
         if (exported &&
