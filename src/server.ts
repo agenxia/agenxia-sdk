@@ -364,6 +364,21 @@ export async function createAgentServer(
       return reply.code(500).send({ error: "git pull failed", output });
     }
 
+    // Reload workflow from disk after pull
+    const newDef = loadWorkflowDefinition(workflowPath);
+    if (newDef) {
+      try {
+        workflowEngine = new WorkflowEngine(newDef, {
+          modulesDir,
+          manifest,
+          llm,
+        });
+        console.log(`[sync] workflow reloaded`);
+      } catch (err) {
+        console.warn(`[sync] workflow reload failed:`, err);
+      }
+    }
+
     return reply.send({ synced: true, output });
   });
 
