@@ -1,6 +1,6 @@
 {
   "name": "@agenxia/sdk",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Agenxia Agent SDK — declarative agent runtime",
   "type": "module",
   "main": "dist/index.js",
