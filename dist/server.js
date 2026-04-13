@@ -115,6 +115,12 @@ export async function createAgentServer(options = {}) {
     // 5. Create Fastify server
     const app = Fastify({ logger: true });
     await app.register(cors, { origin: true });
+    // Private Network Access — permet aux pages HTTPS d'appeler http://localhost
+    app.addHook("onSend", async (request, reply) => {
+        if (request.headers["access-control-request-private-network"] === "true") {
+            reply.header("Access-Control-Allow-Private-Network", "true");
+        }
+    });
     const startTime = Date.now();
     // GET /health
     app.get("/health", async () => ({
