@@ -656,3 +656,170 @@ test("__error mirrors out.error when module returns an error field", async () =>
   assert.equal(out.__done, true);
   h.cleanup();
 });
+
+// -----------------------------------------------------------------------------
+// Input resolution hierarchy (unified inputs/params model).
+// Order from most to least specific:
+//   port.value (pinned in sidebar) > upstream edge > node.data.config[id] > port.default
+// -----------------------------------------------------------------------------
+
+test("input resolution: port.default is used when nothing else provides a value", async () => {
+  const h = makeHarness({
+    A: `module.exports = async (inputs) => ({ got: inputs.url });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        {
+          id: "A",
+          data: {
+            moduleId: "A",
+            ports: {
+              inputs: [
+                {
+                  id: "url",
+                  label: "URL",
+                  type: "text",
+                  default: "https://default.example",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      edges: [],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "res-default" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.A as Record<string, unknown>;
+  assert.equal(out.got, "https://default.example");
+  h.cleanup();
+});
+
+test("input resolution: config[id] overrides port.default", async () => {
+  const h = makeHarness({
+    A: `module.exports = async (inputs) => ({ got: inputs.url });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        {
+          id: "A",
+          data: {
+            moduleId: "A",
+            config: { url: "https://from-config.example" },
+            ports: {
+              inputs: [
+                {
+                  id: "url",
+                  label: "URL",
+                  type: "text",
+                  default: "https://default.example",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      edges: [],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "res-config" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.A as Record<string, unknown>;
+  assert.equal(out.got, "https://from-config.example");
+  h.cleanup();
+});
+
+test("input resolution: upstream edge overrides config and default", async () => {
+  const h = makeHarness({
+    src: `module.exports = async () => ({ url: "https://from-edge.example" });`,
+    dst: `module.exports = async (inputs) => ({ got: inputs.url });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "src",
+      nodes: [
+        { id: "src", data: { moduleId: "src" } },
+        {
+          id: "dst",
+          data: {
+            moduleId: "dst",
+            config: { url: "https://from-config.example" },
+            ports: {
+              inputs: [
+                {
+                  id: "url",
+                  label: "URL",
+                  type: "text",
+                  default: "https://default.example",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      edges: [
+        {
+          source: "src",
+          sourceHandle: "url",
+          target: "dst",
+          targetHandle: "url",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "res-edge" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.dst as Record<string, unknown>;
+  assert.equal(out.got, "https://from-edge.example");
+  h.cleanup();
+});
+
+test("input resolution: pinned port.value wins over upstream edge", async () => {
+  const h = makeHarness({
+    src: `module.exports = async () => ({ url: "https://from-edge.example" });`,
+    dst: `module.exports = async (inputs) => ({ got: inputs.url });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "src",
+      nodes: [
+        { id: "src", data: { moduleId: "src" } },
+        {
+          id: "dst",
+          data: {
+            moduleId: "dst",
+            ports: {
+              inputs: [
+                {
+                  id: "url",
+                  label: "URL",
+                  type: "text",
+                  value: "https://pinned.example",
+                  default: "https://default.example",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      edges: [
+        {
+          source: "src",
+          sourceHandle: "url",
+          target: "dst",
+          targetHandle: "url",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "res-pinned" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.dst as Record<string, unknown>;
+  assert.equal(out.got, "https://pinned.example");
+  h.cleanup();
+});

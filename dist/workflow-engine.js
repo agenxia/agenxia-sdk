@@ -502,19 +502,49 @@ export class WorkflowEngine {
             const { __go: _go, ...regularInputs } = inputs;
             inputs = regularInputs;
         }
-        // Seed default values from input ports that carry a `value` field
-        // (set by the editor UI) when no upstream edge has provided one.
-        // This lets ports act as constant inputs without requiring a
-        // dedicated "literal" source node wired in.
+        // Resolve input values using the canonical hierarchy (most to least
+        // specific):
+        //   1. port.value    — constant pinned in the node editor sidebar
+        //                      (overrides EVERYTHING, including upstream edges)
+        //   2. inputs[id]    — value coming from an upstream edge via
+        //                      resolveInputs (already populated before)
+        //   3. config[id]    — admin/user override saved in node.data.config
+        //                      (from the workflow "Paramètres" panel)
+        //   4. port.default  — fallback declared in the module manifest
+        //
+        // The `scope` field on a port (input | param-admin | param-user) is
+        // purely UI metadata — the engine resolves values the same way for
+        // every scope. The editor controls which UI surface exposes it.
         const inputPorts = node.data?.ports?.inputs ?? [];
+        const configMap = node.data?.config ?? {};
         for (const port of inputPorts) {
             if (!port?.id)
                 continue;
-            if (port.value === undefined)
-                continue;
-            if (inputs[port.id] === undefined) {
+            if (port.value !== undefined) {
+                // Pinned constant — wins over upstream edges.
                 inputs[port.id] = port.value;
+                continue;
             }
+            if (inputs[port.id] !== undefined)
+                continue; // edge provided a value
+            if (port.id in configMap && configMap[port.id] !== undefined) {
+                inputs[port.id] = configMap[port.id];
+                continue;
+            }
+            if (port.default !== undefined) {
+                inputs[port.id] = port.default;
+            }
+        }
+        // Final fallback: any config key not yet exposed in inputs is
+        // surfaced directly. This lets modules migrated to the unified
+        // signature (reading inputs.foo instead of params.foo) work with
+        // legacy workflow.json files where node.data.ports.inputs does
+        // not yet mention every ex-parameter.
+        for (const [k, v] of Object.entries(configMap)) {
+            if (v === undefined)
+                continue;
+            if (inputs[k] === undefined)
+                inputs[k] = v;
         }
         const inputKeys = Object.keys(inputs).join(",") || "(none)";
         if (!moduleId) {
