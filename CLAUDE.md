@@ -51,9 +51,26 @@ tests/
 - Cle manquante cote source : la cle target est presente avec valeur `undefined`
 - Conflit sur meme targetHandle : derniere edge gagne
 
-### Params interpolation
+### Input resolution hierarchy (manifest v2)
 
-`executeNode` interpole `node.data.config` avant de le passer au module :
+Pour chaque input declare dans `node.data.ports.inputs`, `executeNode`
+resout la valeur dans l'ordre (plus specifique au moins) :
+
+1. **`port.value`** — constante figee dans la sidebar (ecrase les edges)
+2. **Edge amont** — valeur deja posee par `resolveInputs`
+3. **`node.data.config[id]`** — override sauve depuis l'onglet "Parametres" du workflow (scope `param-admin` / `param-user`)
+4. **`port.default`** — fallback du manifest
+5. `undefined` sinon
+
+Fallback supplementaire : toute cle restante de `node.data.config` est
+exposee comme input. Permet aux modules migres `(inputs, context)` de
+lire `inputs.foo` sans dependre d'une declaration explicite dans
+`node.data.ports.inputs` (compat workflow.json legacy).
+
+### Params interpolation (legacy, pour modules non migres)
+
+`executeNode` interpole `node.data.config` et le passe en 2e arg aux
+modules pre-v2 :
 - `buildNamedInputs(node, inputs)` cree une vue label-keyee depuis `node.data.ports.inputs`
 - `interpolateParams(params, view)` remplace `{{name}}` dans les strings
 - Objets/arrays JSON-stringifies, cles manquantes → chaine vide
@@ -61,15 +78,19 @@ tests/
 
 ### Modules
 
-Fichiers `modules/<id>/execute.js` en CommonJS :
+Fichiers `modules/<id>/execute.js` en CommonJS. Signature preferee (v2) :
 ```js
-module.exports = async function execute(inputs, params, context) {
-  // inputs  — outputs upstream routes par port
-  // params  — node.data.config interpole
-  // context — { manifest, llm?, nodeId, history }
+module.exports = async function execute(inputs, context) {
+  // inputs  — tout y est : edges amont, constantes figees, overrides
+  //           param-admin/param-user, defaults du manifest
+  // context — { manifest, llm?, nodeId, history, convert, log,
+  //             agentId, platformUrl, sessionId }
   return { response: "..." };
 };
 ```
+Signature legacy `(inputs, params, context)` toujours acceptee — le SDK
+fournit `params` = `node.data.config` interpole pour compat.
+
 Charges via `new Function` shim (pas import/require) car les agents ont `"type": "module"`.
 Sans execute.js = passthrough.
 
@@ -104,4 +125,5 @@ dist/ est commite (pas de CI build).
 - Commits en anglais, messages clairs
 - `npx tsc` doit passer apres chaque modif
 - Tests via `node --test` (pas de framework externe)
-- Ne pas toucher : workflow.json format, module execute.js signature, A2A JSON-RPC protocol
+- Ne pas casser : format workflow.json, protocole A2A JSON-RPC
+- Signature module : `(inputs, context)` pour les nouveaux modules, `(inputs, params, context)` reste supporte pour compat
