@@ -431,7 +431,7 @@ test("getState() returns empty snapshot before first start, last state after", a
 
   const s = engine.getState();
   assert.equal(s.content, "hello");
-  assert.deepEqual(s.nodeOutputs, { A: { response: "hello" } });
+  assert.deepEqual(s.nodeOutputs, { A: { response: "hello", __done: true } });
 
   // Calling getState() again must not re-execute.
   engine.getState();
@@ -465,7 +465,194 @@ test("legacy edges without handles fall back to full-output merge", async () => 
 
   const r = await engine.start();
   const parsed = JSON.parse(r.content) as Record<string, unknown>;
-  assert.deepEqual(parsed, { a: 1, b: 2 });
+  // `__done: true` est systematiquement ajoute par l'engine (system output).
+  assert.deepEqual(parsed, { a: 1, b: 2, __done: true });
 
+  h.cleanup();
+});
+
+// -----------------------------------------------------------------------------
+// System handles: __go gate, __done/__log/__error outputs.
+// -----------------------------------------------------------------------------
+
+test("__go gate: skips node when go signal is falsy", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ value: "hello" });`,
+    B: `module.exports = async (i) => { __calls.B = (__calls.B || 0) + 1; return { response: String(i.value || "") }; };`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+      ],
+      // A.value → B.value (input normal) mais pas de __go → B tourne normalement
+      edges: [
+        {
+          source: "A",
+          target: "B",
+          sourceHandle: "value",
+          targetHandle: "value",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "sys1" } },
+  );
+
+  const r = await engine.start();
+  assert.equal(r.content, "hello");
+  assert.equal(h.calls.B, 1);
+  h.cleanup();
+});
+
+test("__go gate: node skipped when __go is wired but source is absent", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ value: "hi" });`,
+    B: `module.exports = async () => { __calls.B = (__calls.B || 0) + 1; return { response: "ran" }; };`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+      ],
+      // A.value → B.value, et un __go cable depuis un "faux" source
+      // (A.missing n'existe pas → B.__go = undefined → falsy → skip).
+      edges: [
+        {
+          source: "A",
+          target: "B",
+          sourceHandle: "value",
+          targetHandle: "value",
+        },
+        {
+          source: "A",
+          target: "B",
+          sourceHandle: "missing",
+          targetHandle: "__go",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "sys2" } },
+  );
+
+  await engine.start();
+  // B skippe — pas d'exec, pas d'output cache.
+  assert.equal(h.calls.B, undefined);
+  assert.equal(engine.getState().nodeOutputs.B, undefined);
+  h.cleanup();
+});
+
+test("__go gate: node-source runs when __go is the only input", async () => {
+  // Reproduit le cas RSS Le Monde : B n'a aucun input data amont,
+  // juste un __go câblé depuis A.__done. B doit s'exécuter.
+  const h = makeHarness({
+    A: `module.exports = async () => ({ value: "from-A" });`,
+    B: `module.exports = async () => { __calls.B = (__calls.B || 0) + 1; return { response: "B-ran" }; };`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+      ],
+      edges: [
+        {
+          source: "A",
+          target: "B",
+          sourceHandle: "__done",
+          targetHandle: "__go",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "sys6" } },
+  );
+  const r = await engine.start();
+  assert.equal(h.calls.B, 1);
+  assert.equal(r.content, "B-ran");
+  h.cleanup();
+});
+
+test("__done is emitted and can drive another node's __go", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ value: "from-A" });`,
+    B: `module.exports = async (i) => { __calls.B = (__calls.B || 0) + 1; return { response: "B:" + (i.value || "") }; };`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        { id: "A", data: { moduleId: "A" } },
+        { id: "B", data: { moduleId: "B" } },
+      ],
+      edges: [
+        {
+          source: "A",
+          target: "B",
+          sourceHandle: "value",
+          targetHandle: "value",
+        },
+        {
+          source: "A",
+          target: "B",
+          sourceHandle: "__done",
+          targetHandle: "__go",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "sys3" } },
+  );
+
+  const r = await engine.start();
+  assert.equal(h.calls.B, 1);
+  assert.equal(r.content, "B:from-A");
+  h.cleanup();
+});
+
+test("context.log() accumulates into __log output", async () => {
+  const h = makeHarness({
+    A: `module.exports = async (_i, _p, ctx) => { ctx.log("line1"); ctx.log("line2", { k: 1 }); return { response: "ok" }; };`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [{ id: "A", data: { moduleId: "A" } }],
+      edges: [],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "sys4" } },
+  );
+
+  const r = await engine.start();
+  const out = r.nodeOutputs.A as Record<string, unknown>;
+  assert.equal(out.__log, 'line1\nline2 {"k":1}');
+  assert.equal(out.__done, true);
+  h.cleanup();
+});
+
+test("__error mirrors out.error when module returns an error field", async () => {
+  const h = makeHarness({
+    A: `module.exports = async () => ({ error: "boom" });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [{ id: "A", data: { moduleId: "A" } }],
+      edges: [],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "sys5" } },
+  );
+
+  await engine.start();
+  const out = engine.getState().nodeOutputs.A as Record<string, unknown>;
+  assert.equal(out.__error, "boom");
+  assert.equal(out.__done, true);
   h.cleanup();
 });

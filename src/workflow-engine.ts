@@ -54,6 +54,11 @@ export interface ModuleContext {
   agentId?: string;
   platformUrl?: string;
   sessionId?: string;
+  /**
+   * Accumulator for structured logs. Captured lines are exposed on the
+   * node's output under the `__log` key (system handle, bottom-left).
+   */
+  log?: (...args: unknown[]) => void;
 }
 
 export type ModuleExecuteFn = (
@@ -659,6 +664,15 @@ export class WorkflowEngine {
           try {
             const output = await this.executeNode(node, inputs);
             const durationMs = Date.now() - startTs;
+            // output === null → skip silencieux (go-mode sans signal).
+            // Pas de node_complete : le node n'a pas tourné, il n'entre
+            // ni dans `executed` ni dans `outputs`.
+            if (output === null) {
+              console.log(
+                `[workflow] exec ${nodeId} skipped (go-mode, no signal)`,
+              );
+              return { nodeId, output: null, skip: true as const };
+            }
             emit({ type: "node_complete", nodeId, output, durationMs });
             return { nodeId, output, skip: false as const };
           } catch (err) {
@@ -671,7 +685,15 @@ export class WorkflowEngine {
       );
 
       for (const r of batchResults) {
-        if (r.skip) continue;
+        if (r.skip) {
+          // Un node skippé (go-mode sans signal, ou déjà exécuté) doit être
+          // marqué `executed` pour ne pas être replanifié — sinon le scheduler
+          // boucle indéfiniment car ses préds sont déjà exécutés.
+          // Pas d'entrée dans `outputs` : les downstream verront src=undefined
+          // via resolveInputs et en déduiront qu'il n'y a rien à propager.
+          executed.add(r.nodeId);
+          continue;
+        }
         outputs.set(r.nodeId, r.output);
         executed.add(r.nodeId);
         executionOrder.push(r.nodeId);
@@ -722,8 +744,19 @@ export class WorkflowEngine {
   private async executeNode(
     node: WorkflowNode,
     inputs: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<Record<string, unknown> | null> {
     const moduleId = node.data?.moduleId;
+
+    // --- System handle: __go (gate simple) ---
+    // Si __go est câblé, on exécute seulement si la valeur reçue est truthy.
+    // Falsy (undefined, null, false, 0, "") → skip silencieux (downstream non activé).
+    // Aucune contrainte sur les autres inputs : un node-source (ex: RSS) peut
+    // être déclenché uniquement via __go, sans data input amont.
+    if ("__go" in inputs) {
+      if (!inputs["__go"]) return null;
+      const { __go: _go, ...regularInputs } = inputs;
+      inputs = regularInputs;
+    }
 
     // Seed default values from input ports that carry a `value` field
     // (set by the editor UI) when no upstream edge has provided one.
@@ -748,7 +781,7 @@ export class WorkflowEngine {
       console.log(
         `[workflow] exec ${node.id} (passthrough) inputs={${inputKeys}}`,
       );
-      return inputs;
+      return { ...inputs, __done: true };
     }
 
     let fn = this.moduleCache.get(moduleId);
@@ -760,6 +793,7 @@ export class WorkflowEngine {
     const rawParams = (node.data?.config as Record<string, unknown>) ?? {};
     const namedInputs = buildNamedInputs(node, inputs);
     const params = interpolateParams(rawParams, namedInputs);
+    const logs: string[] = [];
     const context: ModuleContext = {
       manifest: this.manifest,
       llm: this.llm,
@@ -769,6 +803,22 @@ export class WorkflowEngine {
       agentId: this._requestContext.agentId,
       platformUrl: this._requestContext.platformUrl,
       sessionId: this._requestContext.sessionId,
+      log: (...args: unknown[]) =>
+        logs.push(
+          args
+            .map((a) =>
+              typeof a === "string"
+                ? a
+                : (() => {
+                    try {
+                      return JSON.stringify(a);
+                    } catch {
+                      return String(a);
+                    }
+                  })(),
+            )
+            .join(" "),
+        ),
     };
     console.log(
       `[workflow] exec ${node.id} (module=${moduleId}) inputs={${inputKeys}} hasLLM=${!!this.llm}`,
@@ -780,6 +830,16 @@ export class WorkflowEngine {
         result && typeof result === "object"
           ? (result as Record<string, unknown>)
           : { value: result };
+      // System outputs: __done (toujours true), __log (si logs émis), __error (miroir de out.error).
+      out.__done = true;
+      if (logs.length > 0) out.__log = logs.join("\n");
+      if (
+        "error" in out &&
+        out.error !== undefined &&
+        out.__error === undefined
+      ) {
+        out.__error = out.error;
+      }
       const outKeys = Object.keys(out).join(",") || "(none)";
       console.log(`[workflow] exec ${node.id} → output={${outKeys}}`);
       return out;

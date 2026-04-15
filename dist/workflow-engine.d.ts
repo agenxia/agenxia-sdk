@@ -36,6 +36,11 @@ export interface ModuleContext {
     agentId?: string;
     platformUrl?: string;
     sessionId?: string;
+    /**
+     * Accumulator for structured logs. Captured lines are exposed on the
+     * node's output under the `__log` key (system handle, bottom-left).
+     */
+    log?: (...args: unknown[]) => void;
 }
 export type ModuleExecuteFn = (inputs: Record<string, unknown>, params: Record<string, unknown>, context: ModuleContext) => Promise<Record<string, unknown> | unknown> | Record<string, unknown> | unknown;
 export interface WorkflowEngineOptions {
