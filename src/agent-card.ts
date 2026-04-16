@@ -27,7 +27,9 @@ interface AgentCardOutput {
 /**
  * Scan api/ directory for route files and derive HTTP endpoints.
  */
-function scanRoutes(rootDir: string): Array<{ method: string; path: string; file: string }> {
+function scanRoutes(
+  rootDir: string,
+): Array<{ method: string; path: string; file: string }> {
   const apiDir = join(rootDir, "api");
   const routes: Array<{ method: string; path: string; file: string }> = [];
 
@@ -41,7 +43,8 @@ function scanRoutes(rootDir: string): Array<{ method: string; path: string; file
       const name = basename(String(entry), ".js");
       const entryStr = String(entry);
       const relDir = entryStr.replace(/[\/][^\/]+$/, "");
-      const dirPrefix = relDir === entryStr ? "" : `/${relDir.replace(/\\/g, "/")}`;
+      const dirPrefix =
+        relDir === entryStr ? "" : `/${relDir.replace(/\\/g, "/")}`;
       const routePath = `/api${dirPrefix}/${name}`;
 
       let method = "POST";
@@ -60,11 +63,13 @@ function scanRoutes(rootDir: string): Array<{ method: string; path: string; file
 /**
  * Generate the full agent-card object from agenxia.json.
  */
-export function generateAgentCard(options: {
-  rootDir?: string;
-  deployUrl?: string;
-  manifest?: AgentManifest;
-} = {}): AgentCardOutput {
+export function generateAgentCard(
+  options: {
+    rootDir?: string;
+    deployUrl?: string;
+    manifest?: AgentManifest;
+  } = {},
+): AgentCardOutput {
   const rootDir = options.rootDir ?? process.cwd();
 
   let manifest: AgentManifest;
@@ -96,7 +101,11 @@ export function generateAgentCard(options: {
 
   const api: Array<{ method: string; path: string; description: string }> = [
     { method: "GET", path: "/health", description: "Health check" },
-    { method: "GET", path: "/.well-known/agent-card.json", description: "Agent discovery card" },
+    {
+      method: "GET",
+      path: "/.well-known/agent-card.json",
+      description: "Agent discovery card",
+    },
     { method: "GET", path: "/docs", description: "API documentation (HTML)" },
   ];
 
@@ -123,7 +132,10 @@ export function generateAgentCard(options: {
   const safeConfig: Record<string, unknown> = {};
   if (manifest.config) {
     for (const [key, value] of Object.entries(manifest.config)) {
-      if (key.toLowerCase().includes("key") || key.toLowerCase().includes("secret")) {
+      if (
+        key.toLowerCase().includes("key") ||
+        key.toLowerCase().includes("secret")
+      ) {
         safeConfig[key] = "***";
       } else {
         safeConfig[key] = value;
@@ -136,7 +148,7 @@ export function generateAgentCard(options: {
     description: manifest.description ?? "",
     version: manifest.version ?? "1.0.0",
     protocol: "a2a-1.0",
-    capabilities: manifest.capabilities ?? manifest.features ?? [],
+    capabilities: [],
     config: safeConfig,
     env_vars: manifest.env_vars ?? [],
     endpoints,
