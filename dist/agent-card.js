@@ -66,7 +66,11 @@ export function generateAgentCard(options = {}) {
     }
     const api = [
         { method: "GET", path: "/health", description: "Health check" },
-        { method: "GET", path: "/.well-known/agent-card.json", description: "Agent discovery card" },
+        {
+            method: "GET",
+            path: "/.well-known/agent-card.json",
+            description: "Agent discovery card",
+        },
         { method: "GET", path: "/docs", description: "API documentation (HTML)" },
     ];
     for (const route of scannedRoutes) {
@@ -90,7 +94,8 @@ export function generateAgentCard(options = {}) {
     const safeConfig = {};
     if (manifest.config) {
         for (const [key, value] of Object.entries(manifest.config)) {
-            if (key.toLowerCase().includes("key") || key.toLowerCase().includes("secret")) {
+            if (key.toLowerCase().includes("key") ||
+                key.toLowerCase().includes("secret")) {
                 safeConfig[key] = "***";
             }
             else {
@@ -103,7 +108,7 @@ export function generateAgentCard(options = {}) {
         description: manifest.description ?? "",
         version: manifest.version ?? "1.0.0",
         protocol: "a2a-1.0",
-        capabilities: manifest.capabilities ?? manifest.features ?? [],
+        capabilities: [],
         config: safeConfig,
         env_vars: manifest.env_vars ?? [],
         endpoints,

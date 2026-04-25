@@ -59,6 +59,12 @@ export interface ModuleContext {
    * node's output under the `__log` key (system handle, bottom-left).
    */
   log?: (...args: unknown[]) => void;
+  /**
+   * For trigger modules in `listen()`: re-runs this node + its descendants.
+   * The node's output is just `{__done: true}` (auto-injected), so any
+   * downstream `__go` edge is satisfied.
+   */
+  triggerNode?: () => void;
 }
 
 export type ModuleExecuteFn = (
@@ -716,6 +722,10 @@ export class WorkflowEngine {
         const incoming = reverseAdj.get(nodeId) ?? [];
         if (incoming.length === 0) continue;
         const allResolved = incoming.every((e) => {
+          // __go edges are OR-triggers (one truthy signal suffices), not
+          // blocking data dependencies. Don't gate on them — the actual
+          // truthy/falsy filtering happens in executeNode.
+          if (e.targetHandle === "__go") return true;
           if (executed.has(e.source)) return true;
           return isReachable(nodeId, e.source, adjacency);
         });
@@ -768,9 +778,9 @@ export class WorkflowEngine {
     //                      (from the workflow "Paramètres" panel)
     //   4. port.default  — fallback declared in the module manifest
     //
-    // The `scope` field on a port (input | param-admin | param-user) is
-    // purely UI metadata — the engine resolves values the same way for
-    // every scope. The editor controls which UI surface exposes it.
+    // The `editableByUser` flag on a port is purely UI metadata — the engine
+    // resolves values the same way regardless. It controls whether non-owner
+    // users can edit the port value via the "Paramètres" panel.
     const inputPorts =
       (
         node.data?.ports as
@@ -779,7 +789,7 @@ export class WorkflowEngine {
                 id?: string;
                 value?: unknown;
                 default?: unknown;
-                scope?: string;
+                editableByUser?: boolean;
               }>;
             }
           | undefined
@@ -854,6 +864,9 @@ export class WorkflowEngine {
             )
             .join(" "),
         ),
+      triggerNode: () => {
+        void this.start(node.id, {});
+      },
     };
     console.log(
       `[workflow] exec ${node.id} (module=${moduleId}) inputs={${inputKeys}} hasLLM=${!!this.llm}`,

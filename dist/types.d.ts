@@ -45,8 +45,6 @@ export interface AgentManifest {
     ports?: PortDefinition[];
     methods?: MethodDefinition[];
     api?: ApiEndpointDefinition[];
-    capabilities?: string[];
-    features?: string[];
     ui?: {
         icon?: string;
         color?: string;

@@ -465,6 +465,11 @@ export class WorkflowEngine {
                 if (incoming.length === 0)
                     continue;
                 const allResolved = incoming.every((e) => {
+                    // __go edges are OR-triggers (one truthy signal suffices), not
+                    // blocking data dependencies. Don't gate on them — the actual
+                    // truthy/falsy filtering happens in executeNode.
+                    if (e.targetHandle === "__go")
+                        return true;
                     if (executed.has(e.source))
                         return true;
                     return isReachable(nodeId, e.source, adjacency);
@@ -512,9 +517,9 @@ export class WorkflowEngine {
         //                      (from the workflow "Paramètres" panel)
         //   4. port.default  — fallback declared in the module manifest
         //
-        // The `scope` field on a port (input | param-admin | param-user) is
-        // purely UI metadata — the engine resolves values the same way for
-        // every scope. The editor controls which UI surface exposes it.
+        // The `editableByUser` flag on a port is purely UI metadata — the engine
+        // resolves values the same way regardless. It controls whether non-owner
+        // users can edit the port value via the "Paramètres" panel.
         const inputPorts = node.data?.ports?.inputs ?? [];
         const configMap = node.data?.config ?? {};
         for (const port of inputPorts) {
@@ -581,6 +586,9 @@ export class WorkflowEngine {
                     }
                 })())
                 .join(" ")),
+            triggerNode: () => {
+                void this.start(node.id, {});
+            },
         };
         console.log(`[workflow] exec ${node.id} (module=${moduleId}) inputs={${inputKeys}} hasLLM=${!!this.llm}`);
         try {

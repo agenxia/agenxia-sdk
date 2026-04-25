@@ -41,6 +41,12 @@ export interface ModuleContext {
      * node's output under the `__log` key (system handle, bottom-left).
      */
     log?: (...args: unknown[]) => void;
+    /**
+     * For trigger modules in `listen()`: re-runs this node + its descendants.
+     * The node's output is just `{__done: true}` (auto-injected), so any
+     * downstream `__go` edge is satisfied.
+     */
+    triggerNode?: () => void;
 }
 export type ModuleExecuteFn = (inputs: Record<string, unknown>, params: Record<string, unknown>, context: ModuleContext) => Promise<Record<string, unknown> | unknown> | Record<string, unknown> | unknown;
 export interface WorkflowEngineOptions {
