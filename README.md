@@ -74,8 +74,8 @@ Response:
 **Conversational workflows** are just workflows where a user message
 happens to drive execution. The client calls `start` with
 `values: { message: "..." }` and the workflow's edges forward the message
-to wherever it's needed (typically an `agent-core` node via
-`sourceHandle: "message" → targetHandle: "message"` routing).
+to wherever it's needed (e.g. an LLM module like `openai` or `anthropic`
+via `sourceHandle: "message" → targetHandle: "message"` routing).
 
 ```json
 // Conversational convention

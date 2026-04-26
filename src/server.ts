@@ -25,8 +25,7 @@ import {
 
 /**
  * Scan workflow nodes for LLM params. Returns the first node.data.config
- * that carries at least one LLM field. The agent-core node is typically
- * the source, but any module can provide them.
+ * that carries at least one LLM field. Any module can provide them.
  */
 function findLLMParams(
   def: WorkflowDefinition,
@@ -39,12 +38,7 @@ function findLLMParams(
     "temperature",
     "max_tokens",
   ];
-  // Prefer agent-core explicitly, then any node that has LLM keys.
-  const core = def.nodes.find((n) => n.data?.moduleId === "agent-core");
-  const candidates = core
-    ? [core, ...def.nodes.filter((n) => n !== core)]
-    : def.nodes;
-  for (const node of candidates) {
+  for (const node of def.nodes) {
     const config = (node.data?.config ?? {}) as Record<string, unknown>;
     if (LLM_KEYS.some((k) => config[k] !== undefined && config[k] !== "")) {
       return config;

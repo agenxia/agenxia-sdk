@@ -1019,8 +1019,8 @@ export class WorkflowEngine {
     };
 
     // Priority 1: `response` from any executed node (LLM modules emit
-    // this — agent-core, etc.). Walk in reverse execution order so the
-    // most recent LLM response wins in cyclic workflows.
+    // this). Walk in reverse execution order so the most recent LLM
+    // response wins in cyclic workflows.
     for (let i = executionOrder.length - 1; i >= 0; i--) {
       const id = executionOrder[i]!;
       const v = getField(outputs.get(id), "response");

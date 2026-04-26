@@ -84,9 +84,9 @@ test("start() with no args runs the workflow from entrypoint", async () => {
 
 // -----------------------------------------------------------------------------
 // 2. start(undefined, {message}) — conversational convention.
-//    The entrypoint is a passthrough; downstream agent-core reads inputs.message.
+//    The entrypoint is a passthrough; downstream LLM node reads inputs.message.
 // -----------------------------------------------------------------------------
-test("start() with values={message} flows through port routing to agent-core", async () => {
+test("start() with values={message} flows through port routing to LLM node", async () => {
   const h = makeHarness({
     entry: `module.exports = async (i) => i;`, // passthrough
     core: `module.exports = async (i) => {
