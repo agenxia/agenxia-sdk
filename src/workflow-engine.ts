@@ -65,6 +65,13 @@ export interface ModuleContext {
    * downstream `__go` edge is satisfied.
    */
   triggerNode?: () => void;
+  /**
+   * For trigger modules that emit on a specific output port (e.g. a Drive
+   * watcher pushing new files into a `files-out` port). Equivalent to
+   * `engine.start(nodeId, { [portId]: value })` — the trigger module's
+   * `execute()` should pass-through inputs to outputs (`return inputs`).
+   */
+  triggerPort?: (portId: string, value: unknown) => void;
 }
 
 export type ModuleExecuteFn = (
@@ -432,6 +439,13 @@ export class WorkflowEngine {
   // mutations of lastOutputs.
   private runLock: Promise<unknown> = Promise.resolve();
 
+  // Cleanup callbacks returned by trigger modules' listen() — invoked
+  // on agent shutdown or before /api/sync re-initializes the engine.
+  private listenerCleanups: Array<{
+    nodeId: string;
+    cleanup: () => void | Promise<void>;
+  }> = [];
+
   constructor(
     workflow: WorkflowDefinition,
     options: {
@@ -452,6 +466,98 @@ export class WorkflowEngine {
     sessionId?: string;
   }): void {
     this._requestContext = ctx;
+  }
+
+  /**
+   * Boots long-running watchers from `listen()` exports of trigger modules.
+   * Idempotent — disposes previous listeners first. Returns the count of
+   * cleanups now registered. Call once after construction (and again
+   * after `/api/sync` reloads the workflow).
+   */
+  async initializeListeners(): Promise<number> {
+    if (this.listenerCleanups.length > 0) {
+      await this.disposeListeners();
+    }
+
+    for (const node of this.workflow.nodes) {
+      const moduleId = (node.data as { moduleId?: string } | undefined)
+        ?.moduleId;
+      if (!moduleId) continue;
+
+      let fn: ModuleExecuteFn;
+      try {
+        fn = await loadModule(this.modulesDir, moduleId);
+      } catch (err) {
+        console.warn(`[listeners] failed to load ${moduleId}:`, err);
+        continue;
+      }
+
+      const fnAny = fn as ModuleExecuteFn & {
+        setup?: (
+          params: Record<string, unknown>,
+          ctx: ModuleContext,
+        ) => unknown;
+        listen?: (
+          params: Record<string, unknown>,
+          ctx: ModuleContext,
+        ) => unknown;
+      };
+      if (typeof fnAny.listen !== "function") continue;
+
+      const rawParams = (node.data?.config as Record<string, unknown>) ?? {};
+      const params = interpolateParams(rawParams, {});
+
+      const nodeId = node.id;
+      const context: ModuleContext = {
+        manifest: this.manifest,
+        llm: this.llm,
+        nodeId,
+        history: [],
+        convert,
+        agentId: this._requestContext.agentId,
+        platformUrl: this._requestContext.platformUrl,
+        sessionId: this._requestContext.sessionId,
+        log: (...args: unknown[]) => console.log(`[listen:${nodeId}]`, ...args),
+        triggerNode: () => {
+          void this.start(nodeId, {});
+        },
+        triggerPort: (portId: string, value: unknown) => {
+          void this.start(nodeId, { [portId]: value });
+        },
+      };
+
+      try {
+        if (typeof fnAny.setup === "function") {
+          await fnAny.setup(params, context);
+        }
+        const cleanup = await fnAny.listen(params, context);
+        if (typeof cleanup === "function") {
+          this.listenerCleanups.push({
+            nodeId,
+            cleanup: cleanup as () => void,
+          });
+          console.log(`[listeners] started ${moduleId} on node ${nodeId}`);
+        }
+      } catch (err) {
+        console.error(`[listeners] ${moduleId} on ${nodeId} failed:`, err);
+      }
+    }
+    return this.listenerCleanups.length;
+  }
+
+  /**
+   * Invoke all stored cleanups (e.g. clearInterval) on agent shutdown
+   * or before re-init. Errors are logged, never thrown.
+   */
+  async disposeListeners(): Promise<void> {
+    const pending = this.listenerCleanups.splice(0);
+    for (const { nodeId, cleanup } of pending) {
+      try {
+        await cleanup();
+      } catch (err) {
+        console.warn(`[listeners] cleanup ${nodeId} error:`, err);
+      }
+    }
   }
 
   getHistory(): ChatHistoryMessage[] {
@@ -866,6 +972,9 @@ export class WorkflowEngine {
         ),
       triggerNode: () => {
         void this.start(node.id, {});
+      },
+      triggerPort: (portId: string, value: unknown) => {
+        void this.start(node.id, { [portId]: value });
       },
     };
     console.log(

@@ -47,6 +47,13 @@ export interface ModuleContext {
      * downstream `__go` edge is satisfied.
      */
     triggerNode?: () => void;
+    /**
+     * For trigger modules that emit on a specific output port (e.g. a Drive
+     * watcher pushing new files into a `files-out` port). Equivalent to
+     * `engine.start(nodeId, { [portId]: value })` — the trigger module's
+     * `execute()` should pass-through inputs to outputs (`return inputs`).
+     */
+    triggerPort?: (portId: string, value: unknown) => void;
 }
 export type ModuleExecuteFn = (inputs: Record<string, unknown>, params: Record<string, unknown>, context: ModuleContext) => Promise<Record<string, unknown> | unknown> | Record<string, unknown> | unknown;
 export interface WorkflowEngineOptions {
@@ -119,6 +126,7 @@ export declare class WorkflowEngine {
     private lastOutputs;
     private lastContent;
     private runLock;
+    private listenerCleanups;
     constructor(workflow: WorkflowDefinition, options: {
         modulesDir: string;
         manifest: AgentManifest;
@@ -129,6 +137,18 @@ export declare class WorkflowEngine {
         platformUrl?: string;
         sessionId?: string;
     }): void;
+    /**
+     * Boots long-running watchers from `listen()` exports of trigger modules.
+     * Idempotent — disposes previous listeners first. Returns the count of
+     * cleanups now registered. Call once after construction (and again
+     * after `/api/sync` reloads the workflow).
+     */
+    initializeListeners(): Promise<number>;
+    /**
+     * Invoke all stored cleanups (e.g. clearInterval) on agent shutdown
+     * or before re-init. Errors are logged, never thrown.
+     */
+    disposeListeners(): Promise<void>;
     getHistory(): ChatHistoryMessage[];
     /** Snapshot of the last known outputs for every executed node. */
     getLastOutputs(): Record<string, unknown>;

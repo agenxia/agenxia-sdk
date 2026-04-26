@@ -103,6 +103,9 @@ export async function createAgentServer(options = {}) {
                 manifest,
                 llm,
             });
+            const count = await workflowEngine.initializeListeners();
+            if (count > 0)
+                console.log(`[agent] ${count} listener(s) active`);
         }
         catch (err) {
             console.warn(`[workflow] failed to initialize:`, err);
@@ -312,12 +315,16 @@ export async function createAgentServer(options = {}) {
         const newDef = loadWorkflowDefinition(workflowPath);
         if (newDef) {
             try {
+                // Tear down listeners from the previous workflow first.
+                if (workflowEngine)
+                    await workflowEngine.disposeListeners();
                 workflowEngine = new WorkflowEngine(newDef, {
                     modulesDir,
                     manifest,
                     llm,
                 });
-                console.log(`[sync] workflow reloaded`);
+                const count = await workflowEngine.initializeListeners();
+                console.log(`[sync] workflow reloaded — ${count} listener(s) active`);
             }
             catch (err) {
                 console.warn(`[sync] workflow reload failed:`, err);
@@ -417,5 +424,22 @@ export async function createAgentServer(options = {}) {
     // 6. Start server
     await app.listen({ port, host });
     console.log(`Agent "${manifest.name}" running on http://${host}:${port}`);
+    // 7. Graceful shutdown — dispose listeners then close Fastify
+    const shutdown = async (signal) => {
+        console.log(`[agent] received ${signal}, shutting down…`);
+        try {
+            if (workflowEngine)
+                await workflowEngine.disposeListeners();
+            await app.close();
+        }
+        catch (err) {
+            console.warn(`[agent] shutdown error:`, err);
+        }
+        finally {
+            process.exit(0);
+        }
+    };
+    process.once("SIGTERM", () => void shutdown("SIGTERM"));
+    process.once("SIGINT", () => void shutdown("SIGINT"));
 }
 //# sourceMappingURL=server.js.map
