@@ -180,6 +180,20 @@ export async function createAgentServer(
     return { nodeId, values };
   };
 
+  // Pull user_id from the body (preferred — set by the platform per call)
+  // or from a header fallback.
+  const extractUserId = (
+    body: Record<string, unknown> | undefined,
+    headers: Record<string, unknown>,
+  ): string | undefined => {
+    const fromBody = body?.user_id;
+    if (typeof fromBody === "string" && fromBody.length > 0) return fromBody;
+    const fromHeader = headers["x-user-id"];
+    if (typeof fromHeader === "string" && fromHeader.length > 0)
+      return fromHeader;
+    return undefined;
+  };
+
   // POST /a2a — JSON-RPC 2.0
   app.post("/a2a", async (req, reply) => {
     const body = req.body as {
@@ -255,6 +269,7 @@ export async function createAgentServer(
         sessionId: req.headers["x-session-id"] as string | undefined,
         agentId: req.headers["x-agent-id"] as string | undefined,
         platformUrl: req.headers["x-platform-url"] as string | undefined,
+        userId: extractUserId(body.params, req.headers),
       });
       const run = await workflowEngine.start(nodeId, values);
       result = {
@@ -329,6 +344,7 @@ export async function createAgentServer(
         sessionId: req.headers["x-session-id"] as string | undefined,
         agentId: req.headers["x-agent-id"] as string | undefined,
         platformUrl: req.headers["x-platform-url"] as string | undefined,
+        userId: extractUserId(body.params, req.headers),
       });
       await workflowEngine.start(nodeId, values, { onEvent });
     } catch (err) {
@@ -395,12 +411,15 @@ export async function createAgentServer(
   // Helper: set request context headers common to all start paths.
   const setCtxFromHeaders = (req: {
     headers: Record<string, unknown>;
+    body?: unknown;
   }): void => {
     if (!workflowEngine) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
     workflowEngine.setRequestContext({
       sessionId: req.headers["x-session-id"] as string | undefined,
       agentId: req.headers["x-agent-id"] as string | undefined,
       platformUrl: req.headers["x-platform-url"] as string | undefined,
+      userId: extractUserId(body, req.headers),
     });
   };
 

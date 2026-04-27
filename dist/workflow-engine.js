@@ -292,6 +292,7 @@ export class WorkflowEngine {
                 agentId: this._requestContext.agentId,
                 platformUrl: this._requestContext.platformUrl,
                 sessionId: this._requestContext.sessionId,
+                userId: this._requestContext.userId,
                 log: (...args) => console.log(`[listen:${nodeId}]`, ...args),
                 triggerNode: () => {
                     void this.start(nodeId, {});
@@ -657,6 +658,7 @@ export class WorkflowEngine {
             agentId: this._requestContext.agentId,
             platformUrl: this._requestContext.platformUrl,
             sessionId: this._requestContext.sessionId,
+            userId: this._requestContext.userId,
             log: (...args) => logs.push(args
                 .map((a) => typeof a === "string"
                 ? a
@@ -709,8 +711,8 @@ export class WorkflowEngine {
             return typeof v === "string" && v !== "" ? v : null;
         };
         // Priority 1: `response` from any executed node (LLM modules emit
-        // this — agent-core, etc.). Walk in reverse execution order so the
-        // most recent LLM response wins in cyclic workflows.
+        // this). Walk in reverse execution order so the most recent LLM
+        // response wins in cyclic workflows.
         for (let i = executionOrder.length - 1; i >= 0; i--) {
             const id = executionOrder[i];
             const v = getField(outputs.get(id), "response");

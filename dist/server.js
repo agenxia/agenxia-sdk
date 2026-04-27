@@ -15,8 +15,7 @@ import { createLLM } from "./llm.js";
 import { WorkflowEngine, defaultWorkflowPaths, loadWorkflowDefinition, } from "./workflow-engine.js";
 /**
  * Scan workflow nodes for LLM params. Returns the first node.data.config
- * that carries at least one LLM field. The agent-core node is typically
- * the source, but any module can provide them.
+ * that carries at least one LLM field. Any module can provide them.
  */
 function findLLMParams(def) {
     const LLM_KEYS = [
@@ -27,12 +26,7 @@ function findLLMParams(def) {
         "temperature",
         "max_tokens",
     ];
-    // Prefer agent-core explicitly, then any node that has LLM keys.
-    const core = def.nodes.find((n) => n.data?.moduleId === "agent-core");
-    const candidates = core
-        ? [core, ...def.nodes.filter((n) => n !== core)]
-        : def.nodes;
-    for (const node of candidates) {
+    for (const node of def.nodes) {
         const config = (node.data?.config ?? {});
         if (LLM_KEYS.some((k) => config[k] !== undefined && config[k] !== "")) {
             return config;
@@ -150,6 +144,17 @@ export async function createAgentServer(options = {}) {
             : {};
         return { nodeId, values };
     };
+    // Pull user_id from the body (preferred — set by the platform per call)
+    // or from a header fallback.
+    const extractUserId = (body, headers) => {
+        const fromBody = body?.user_id;
+        if (typeof fromBody === "string" && fromBody.length > 0)
+            return fromBody;
+        const fromHeader = headers["x-user-id"];
+        if (typeof fromHeader === "string" && fromHeader.length > 0)
+            return fromHeader;
+        return undefined;
+    };
     // POST /a2a — JSON-RPC 2.0
     app.post("/a2a", async (req, reply) => {
         const body = req.body;
@@ -214,6 +219,7 @@ export async function createAgentServer(options = {}) {
                 sessionId: req.headers["x-session-id"],
                 agentId: req.headers["x-agent-id"],
                 platformUrl: req.headers["x-platform-url"],
+                userId: extractUserId(body.params, req.headers),
             });
             const run = await workflowEngine.start(nodeId, values);
             result = {
@@ -276,6 +282,7 @@ export async function createAgentServer(options = {}) {
                 sessionId: req.headers["x-session-id"],
                 agentId: req.headers["x-agent-id"],
                 platformUrl: req.headers["x-platform-url"],
+                userId: extractUserId(body.params, req.headers),
             });
             await workflowEngine.start(nodeId, values, { onEvent });
         }
@@ -339,10 +346,12 @@ export async function createAgentServer(options = {}) {
     const setCtxFromHeaders = (req) => {
         if (!workflowEngine)
             return;
+        const body = (req.body ?? {});
         workflowEngine.setRequestContext({
             sessionId: req.headers["x-session-id"],
             agentId: req.headers["x-agent-id"],
             platformUrl: req.headers["x-platform-url"],
+            userId: extractUserId(body, req.headers),
         });
     };
     // GET /api/state — read-only snapshot, no execution.

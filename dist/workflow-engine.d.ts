@@ -37,6 +37,12 @@ export interface ModuleContext {
     platformUrl?: string;
     sessionId?: string;
     /**
+     * ID of the platform user who triggered this workflow run, when known.
+     * LLM modules should forward it as the `user` param to OpenAI-compatible
+     * APIs so LiteLLM attributes spend logs to the right user.
+     */
+    userId?: string;
+    /**
      * Accumulator for structured logs. Captured lines are exposed on the
      * node's output under the `__log` key (system handle, bottom-left).
      */
@@ -136,6 +142,7 @@ export declare class WorkflowEngine {
         agentId?: string;
         platformUrl?: string;
         sessionId?: string;
+        userId?: string;
     }): void;
     /**
      * Boots long-running watchers from `listen()` exports of trigger modules.
