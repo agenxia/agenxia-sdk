@@ -1,1 +1,5 @@
 node_modules/
+
+# Lockfiles not committed (lib package — consumers resolve their own deps)
+bun.lock
+package-lock.json
