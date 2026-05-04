@@ -21,7 +21,7 @@ Pas de linter configure dans le repo (pas de eslint.config.js).
 src/
   server.ts          # Fastify — routes /health /docs /a2a /a2a/stream /api/sync
   workflow-engine.ts  # WorkflowEngine class — DAG executor with caching
-  llm.ts             # createLLM() + getLLMClient() — client OpenAI-compatible
+  llm.ts             # createLLM() + getLLMClient() — client OpenAI-compatible (chat + embeddings)
   types.ts           # AgentManifest, PortDefinition, MethodDefinition
   agent-card.ts      # Agent discovery card generator
   docs.ts            # HTML doc generator
@@ -102,6 +102,13 @@ Le SDK expose deux helpers depuis `@agenxia/sdk/llm` :
   - **Mode plateforme** : si `PLATFORM_URL` + `AGENT_PLATFORM_TOKEN` sont présents (injectés par le daemon CLI ou par Coolify au démarrage), route les appels vers le proxy plateforme `${PLATFORM_URL}/api/llm/v1/chat/completions`. L'agent n'a aucun secret à gérer.
   - **Mode standalone** : fallback sur `LLM_API_URL` + `LLM_API_KEY` du `.env` local — utile pour exécuter un agent hors de la plateforme.
 - **`createLLM({ apiUrl, apiKey, model, ... })`** — client OpenAI-compat bas niveau, à utiliser quand on veut piloter manuellement l'URL et la clé (ex. provider externe spécifique).
+
+Le client retourné expose deux méthodes :
+
+- **`chat(messages, overrides?)`** → `{ content, model, usage? }` — POST `/v1/chat/completions`, format OpenAI strict (`messages: [{ role, content }]`).
+- **`embed(input, overrides?)`** → `{ embeddings: number[][], model, usage? }` — POST `/v1/embeddings`. `input` peut être `string` ou `string[]` ; `embeddings` est **toujours** un tableau de vecteurs (longueur 1 pour un input unique).
+
+**Piège** : le `model` par défaut de `getLLMClient` (`llama-3.3-70b`) est un chat model. Pour `embed()` il faut passer un embedding model en override, soit à la construction (`getLLMClient({ model: 'text-embedding-3-small' })`), soit à l'appel (`client.embed(input, { model: 'text-embedding-3-small' })`).
 
 Dans un node `execute.js`, `context.llm` est instancié automatiquement via `getLLMClient` quand le node a une `model` définie ; sinon `undefined`. Params (model, temperature, max_tokens, system_prompt) lus depuis le workflow node config en priorité, env vars en fallback.
 

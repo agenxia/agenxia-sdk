@@ -222,9 +222,28 @@ module.exports = async function execute(inputs, params, context) {
 ```
 
 `context.llm` is **optional**. Modules that need a LLM check for it; modules
-that don't simply ignore it. The SDK creates the LLM client only when both
-`LLM_API_URL` and `LLM_API_KEY` are available — either from a workflow node
-config (priority) or from environment variables (fallback).
+that don't simply ignore it. The SDK creates the LLM client via
+`getLLMClient()`, which auto-detects the runtime mode: platform proxy
+(`PLATFORM_URL` + `AGENT_PLATFORM_TOKEN`) or standalone (`LLM_API_URL` +
+`LLM_API_KEY`). Workflow node config takes priority over env vars.
+
+The client exposes both `chat()` and `embed()`:
+
+```ts
+import { getLLMClient } from "@agenxia/sdk/llm";
+
+const llm = getLLMClient(); // default model: llama-3.3-70b (chat)
+const { content } = await llm.chat([
+  { role: "user", content: "Bonjour" },
+]);
+
+// For embeddings, override the model — the default is a chat model.
+const { embeddings } = await llm.embed(
+  ["premier texte", "second texte"],
+  { model: "text-embedding-3-small" },
+);
+// embeddings.length === 2, each entry is a number[]
+```
 
 Modules without `execute.js` are treated as passthrough — they re-emit their
 inputs. This is the default for UI widgets.
