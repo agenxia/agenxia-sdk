@@ -1,5 +1,10 @@
-// OpenAI-compatible LLM client
+// OpenAI-compatible LLM client (chat + embeddings)
 export function createLLM(options) {
+    const baseHeaders = () => ({
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${options.apiKey}`,
+        ...(options.extraHeaders ?? {}),
+    });
     return {
         async chat(messages, overrides) {
             const opts = { ...options, ...overrides };
@@ -33,6 +38,30 @@ export function createLLM(options) {
                 usage: data.usage,
             };
         },
+        async embed(input, overrides) {
+            const model = overrides?.model ?? options.model;
+            const res = await fetch(`${options.apiUrl}/v1/embeddings`, {
+                method: "POST",
+                headers: baseHeaders(),
+                body: JSON.stringify({ model, input }),
+            });
+            if (!res.ok) {
+                const body = await res.text();
+                throw new Error(`LLM embeddings API error ${res.status}: ${body}`);
+            }
+            const data = (await res.json());
+            const items = data.data ?? [];
+            // Préserve l'ordre d'origine (OpenAI renvoie en général index croissant,
+            // mais on s'en assure si le champ est présent).
+            const ordered = items.every((it) => typeof it.index === "number")
+                ? [...items].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+                : items;
+            return {
+                embeddings: ordered.map((it) => it.embedding ?? []),
+                model: data.model ?? model,
+                usage: data.usage,
+            };
+        },
     };
 }
 /**
@@ -42,6 +71,11 @@ export function createLLM(options) {
  *
  * Le mode plateforme est recommandé : pas de clé API à gérer dans l'agent, billing centralisé,
  * tracing par agentId, providers configurés une fois sur la plateforme.
+ *
+ * Note : le `model` par défaut (`llama-3.3-70b`) est un chat model. Pour
+ * appeler `embed()`, passe un embedding model en override soit à
+ * `getLLMClient({ model: 'text-embedding-3-small' })` soit directement à
+ * `client.embed(input, { model: 'text-embedding-3-small' })`.
  */
 export function getLLMClient(overrides) {
     const platformUrl = process.env.PLATFORM_URL;

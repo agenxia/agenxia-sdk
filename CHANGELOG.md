@@ -2,6 +2,28 @@
 
 All notable changes to `@agenxia/sdk`.
 
+## [2.5.0] - 2026-04-27
+
+### Added — `embed()` on the LLM client
+
+`createLLM()` and `getLLMClient()` now return an `LLMClient` exposing both
+`chat()` and `embed()`. Same auto-detect logic as before — platform proxy
+when `PLATFORM_URL` + `AGENT_PLATFORM_TOKEN` are set, standalone via
+`LLM_API_URL` + `LLM_API_KEY` otherwise.
+
+```ts
+const llm = getLLMClient({ model: "text-embedding-3-small" });
+const { embeddings, usage } = await llm.embed(["hello", "world"]);
+// embeddings: number[][] (always, even for a single string input)
+```
+
+The default model of `getLLMClient()` (`llama-3.3-70b`) is a chat model;
+pass an embedding model explicitly to `embed()` (or to `getLLMClient`)
+when you need vectors.
+
+New types: `EmbeddingResponse`, `LLMClient`. No breaking change on
+`chat()`.
+
 ## [2.0.0] - 2026-04-09
 
 ### BREAKING — unified `start(nodeId?, values?)` API
