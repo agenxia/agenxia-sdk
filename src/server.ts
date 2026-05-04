@@ -21,6 +21,7 @@ import {
   defaultWorkflowPaths,
   loadWorkflowDefinition,
   type WorkflowDefinition,
+  type InitNodeMetadata,
 } from "./workflow-engine.js";
 
 /**
@@ -459,6 +460,87 @@ export async function createAgentServer(
     });
   };
 
+  // Fetch the per-(user, agent) module config map from the platform.
+  // Returns null silently when the env contract is incomplete (local
+  // dev, agents not registered to a platform, etc.) — the engine then
+  // resolves inputs against deployment-wide defaults only.
+  const fetchUserConfigFromPlatform = async (
+    userId: string | undefined,
+  ): Promise<Record<string, Record<string, unknown>> | null> => {
+    if (!userId) return null;
+    const platformUrl = process.env.PLATFORM_URL;
+    const agentId = process.env.AGENT_ID;
+    const agentToken = process.env.AGENT_PLATFORM_TOKEN;
+    if (!platformUrl || !agentId || !agentToken) return null;
+    try {
+      const url = `${platformUrl.replace(/\/$/, "")}/api/agents/${encodeURIComponent(agentId)}/user-config?user_id=${encodeURIComponent(userId)}`;
+      const res = await fetch(url, {
+        headers: {
+          "x-agent-id": agentId,
+          "x-agent-token": agentToken,
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) {
+        console.warn(`[user-config] platform returned ${res.status}`);
+        return null;
+      }
+      const data = (await res.json()) as { nodes?: Record<string, unknown> };
+      if (!data?.nodes || typeof data.nodes !== "object") return null;
+      const out: Record<string, Record<string, unknown>> = {};
+      for (const [nodeId, entry] of Object.entries(data.nodes)) {
+        const cfg = (entry as { config?: Record<string, unknown> })?.config;
+        if (cfg && typeof cfg === "object") out[nodeId] = cfg;
+      }
+      return out;
+    } catch (err) {
+      console.warn(
+        "[user-config] fetch failed:",
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    }
+  };
+
+  // Same as setCtxFromHeaders, but also fetches the per-user config
+  // from the platform and seeds the engine. Returns the list of init
+  // nodes that are still pending for this user — the caller decides
+  // whether to gate the run on it.
+  const applyRunContext = async (req: {
+    headers: Record<string, unknown>;
+    body?: unknown;
+  }): Promise<{ pendingInit: InitNodeMetadata[] }> => {
+    if (!workflowEngine) return { pendingInit: [] };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const userId = extractUserId(body, req.headers);
+    workflowEngine.setRequestContext({
+      sessionId: req.headers["x-session-id"] as string | undefined,
+      agentId: req.headers["x-agent-id"] as string | undefined,
+      platformUrl: req.headers["x-platform-url"] as string | undefined,
+      userId,
+    });
+
+    const userConfig = await fetchUserConfigFromPlatform(userId);
+    if (userConfig) workflowEngine.setUserConfig(userConfig);
+    else workflowEngine.clearUserConfig();
+
+    const pendingInit: InitNodeMetadata[] = [];
+    if (userId) {
+      const initNodes = workflowEngine.listInitNodes();
+      for (const n of initNodes) {
+        if (!n.required) continue;
+        const cfg = userConfig?.[n.node_id];
+        const produces = n.produces ?? [];
+        const allFilled =
+          produces.length > 0 &&
+          cfg &&
+          produces.every((k) => cfg[k] !== undefined && cfg[k] !== null);
+        if (!allFilled) pendingInit.push(n);
+      }
+    }
+    return { pendingInit };
+  };
+
   // GET /api/state — read-only snapshot, no execution.
   app.get("/api/state", async (_req, reply) => {
     if (!workflowEngine) {
@@ -479,7 +561,13 @@ export async function createAgentServer(
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
     const { nodeId, values } = extractStartArgs(body);
-    setCtxFromHeaders(req);
+    const { pendingInit } = await applyRunContext(req);
+    if (pendingInit.length > 0) {
+      return reply.code(412).send({
+        error: "Initialization required",
+        pending_init: pendingInit,
+      });
+    }
     try {
       const run = await workflowEngine.start(nodeId, values);
       return reply.send({
@@ -500,7 +588,13 @@ export async function createAgentServer(
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
     const { nodeId, values } = extractStartArgs(body);
-    setCtxFromHeaders(req);
+    const { pendingInit } = await applyRunContext(req);
+    if (pendingInit.length > 0) {
+      return reply.code(412).send({
+        error: "Initialization required",
+        pending_init: pendingInit,
+      });
+    }
 
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -535,6 +629,100 @@ export async function createAgentServer(
     } finally {
       if (!closed && !reply.raw.destroyed) reply.raw.end();
     }
+  });
+
+  // POST /api/init — start the init() flow for a node. Body:
+  //   { node_id, user_id, callback_url, state_token? }
+  // Returns the module's response: { status: 'redirect'|'done'|'error', ... }.
+  app.post("/api/init", async (req, reply) => {
+    if (!workflowEngine) {
+      return reply.code(400).send({ error: "No workflow.json found" });
+    }
+    const body = (req.body ?? {}) as {
+      node_id?: string;
+      user_id?: string;
+      callback_url?: string;
+      state_token?: string;
+    };
+    if (!body.node_id || !body.user_id || !body.callback_url) {
+      return reply.code(400).send({
+        error: "node_id, user_id, callback_url are required",
+      });
+    }
+    workflowEngine.setRequestContext({
+      agentId: process.env.AGENT_ID,
+      platformUrl: process.env.PLATFORM_URL,
+      userId: body.user_id,
+    });
+    const result = await workflowEngine.runModuleInit(body.node_id, {
+      phase: "start",
+      userId: body.user_id,
+      callbackUrl: body.callback_url,
+      stateToken: body.state_token,
+    });
+    return reply.send(result);
+  });
+
+  // POST /api/init/complete — second leg of an OAuth init. Body:
+  //   { node_id, user_id, code, state }
+  app.post("/api/init/complete", async (req, reply) => {
+    if (!workflowEngine) {
+      return reply.code(400).send({ error: "No workflow.json found" });
+    }
+    const body = (req.body ?? {}) as {
+      node_id?: string;
+      user_id?: string;
+      code?: string;
+      state?: string;
+    };
+    if (!body.node_id || !body.user_id || !body.code) {
+      return reply.code(400).send({
+        error: "node_id, user_id, code are required",
+      });
+    }
+    workflowEngine.setRequestContext({
+      agentId: process.env.AGENT_ID,
+      platformUrl: process.env.PLATFORM_URL,
+      userId: body.user_id,
+    });
+    const result = await workflowEngine.runModuleInit(body.node_id, {
+      phase: "complete",
+      userId: body.user_id,
+      callbackUrl: "",
+      code: body.code,
+      state: body.state,
+    });
+    return reply.send(result);
+  });
+
+  // GET /api/init/status?user_id=X — list init-bearing nodes and their
+  // status for the given user.
+  app.get("/api/init/status", async (req, reply) => {
+    if (!workflowEngine) {
+      return reply.code(400).send({ error: "No workflow.json found" });
+    }
+    const userId = (req.query as { user_id?: string })?.user_id;
+    const initNodes = workflowEngine.listInitNodes();
+
+    let userConfig: Record<string, Record<string, unknown>> | null = null;
+    if (userId) userConfig = await fetchUserConfigFromPlatform(userId);
+
+    const nodes = initNodes.map((n) => {
+      const cfg = userConfig?.[n.node_id];
+      const produces = n.produces ?? [];
+      const done =
+        produces.length > 0 &&
+        cfg &&
+        produces.every((k) => cfg[k] !== undefined && cfg[k] !== null);
+      return { ...n, init_status: done ? "done" : "pending" };
+    });
+
+    return reply.send({
+      nodes,
+      ready: nodes
+        .filter((n) => n.required)
+        .every((n) => n.init_status === "done"),
+    });
   });
 
   // 6. Start server

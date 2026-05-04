@@ -34,6 +34,18 @@ export interface AgentConfig {
     temperature?: number;
     max_tokens?: number;
 }
+export interface ModulesLockEntry {
+    version: string;
+    sha: string;
+    pinned?: boolean;
+    installedAt?: string;
+}
+export interface ModulesLock {
+    lockfileVersion: number;
+    modulesRepoSha?: string;
+    generatedAt?: string;
+    modules: Record<string, ModulesLockEntry>;
+}
 export interface AgentManifest {
     name: string;
     version?: string;

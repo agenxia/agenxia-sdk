@@ -417,6 +417,47 @@ async function loadModule(
 // Engine
 // ---------------------------------------------------------------------------
 
+/**
+ * Subset of a module manifest that the engine reads at runtime — just
+ * enough to drive init() flows. Other manifest fields (icon, color, full
+ * port specs, etc.) are not needed inside the agent process.
+ */
+export interface ModuleManifestLite {
+  id?: string;
+  init?: {
+    required?: boolean;
+    label?: string;
+    description?: string;
+    produces?: string[];
+  };
+}
+
+export interface InitNodeMetadata {
+  node_id: string;
+  module_id: string;
+  label: string | null;
+  description: string | null;
+  required: boolean;
+  produces: string[];
+}
+
+export interface InitContextPayload {
+  phase: "start" | "complete";
+  userId: string;
+  callbackUrl: string;
+  stateToken?: string;
+  code?: string;
+  state?: string;
+}
+
+export interface InitResult {
+  status: "redirect" | "done" | "error";
+  module_id?: string;
+  url?: string;
+  config?: Record<string, unknown>;
+  message?: string;
+}
+
 export class WorkflowEngine {
   private readonly workflow: WorkflowDefinition;
   private readonly modulesDir: string;
@@ -429,7 +470,14 @@ export class WorkflowEngine {
     userId?: string;
   } = {};
   private readonly moduleCache = new Map<string, ModuleExecuteFn>();
+  private readonly manifestCache = new Map<string, ModuleManifestLite | null>();
   private readonly history: ChatHistoryMessage[] = [];
+
+  // Per-(userId, nodeId) override config, populated by setUserConfig()
+  // before each run from the platform's user_module_config store.
+  // Resolution order: pinned port > upstream edge > userOverride >
+  //                   node.data.config > port.default.
+  private _userConfig: Map<string, Record<string, unknown>> = new Map();
 
   // Persistent output cache across start() calls. Reads: used as
   // upstream input source for nodes outside the subgraph being
@@ -474,6 +522,184 @@ export class WorkflowEngine {
     userId?: string;
   }): void {
     this._requestContext = ctx;
+  }
+
+  /**
+   * Stores the per-user config map fetched from the platform
+   * (`/api/agents/:id/user-config?user_id=…`). Keys are node IDs;
+   * values are partial configs that override `node.data.config` for
+   * the duration of the next run. Call before `start()` and clear
+   * with `clearUserConfig()` afterwards if needed.
+   */
+  setUserConfig(map: Record<string, Record<string, unknown>>): void {
+    this._userConfig.clear();
+    for (const [nodeId, cfg] of Object.entries(map ?? {})) {
+      if (cfg && typeof cfg === "object") this._userConfig.set(nodeId, cfg);
+    }
+  }
+
+  clearUserConfig(): void {
+    this._userConfig.clear();
+  }
+
+  /**
+   * Read a module's manifest.json from the agent's modules dir.
+   * Returns null when the file is absent or invalid — manifests are
+   * not strictly required at runtime, only by features that opt in
+   * (init() flows, etc.).
+   */
+  private loadModuleManifest(moduleId: string): ModuleManifestLite | null {
+    if (this.manifestCache.has(moduleId)) {
+      return this.manifestCache.get(moduleId) ?? null;
+    }
+    const path = join(this.modulesDir, moduleId, "manifest.json");
+    if (!existsSync(path)) {
+      this.manifestCache.set(moduleId, null);
+      return null;
+    }
+    try {
+      const raw = readFileSync(path, "utf-8");
+      const parsed = JSON.parse(raw) as ModuleManifestLite;
+      this.manifestCache.set(moduleId, parsed);
+      return parsed;
+    } catch {
+      this.manifestCache.set(moduleId, null);
+      return null;
+    }
+  }
+
+  /**
+   * Walk the workflow's nodes and return the metadata for those whose
+   * module declares an `init` section in its manifest. Used by
+   * `/api/init/status` and the platform's setup page.
+   */
+  listInitNodes(): InitNodeMetadata[] {
+    const result: InitNodeMetadata[] = [];
+    for (const node of this.workflow.nodes) {
+      const moduleId = (node.data as { moduleId?: string } | undefined)
+        ?.moduleId;
+      if (!moduleId) continue;
+      const manifest = this.loadModuleManifest(moduleId);
+      if (!manifest?.init) continue;
+      result.push({
+        node_id: node.id,
+        module_id: moduleId,
+        label: manifest.init.label ?? null,
+        description: manifest.init.description ?? null,
+        required: manifest.init.required === true,
+        produces: Array.isArray(manifest.init.produces)
+          ? manifest.init.produces
+          : [],
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Resolve the param-admin inputs for a node, applying the same
+   * priority order as `executeNode` minus upstream edges (which don't
+   * exist at init time): pinned > config > default.
+   */
+  private resolveAdminConfig(node: WorkflowNode): Record<string, unknown> {
+    const ports =
+      (
+        node.data?.ports as
+          | {
+              inputs?: Array<{
+                id?: string;
+                scope?: string;
+                value?: unknown;
+                default?: unknown;
+              }>;
+            }
+          | undefined
+      )?.inputs ?? [];
+    const config = (node.data?.config as Record<string, unknown>) ?? {};
+    const result: Record<string, unknown> = {};
+    for (const p of ports) {
+      if (!p?.id || p.scope !== "param-admin") continue;
+      if (p.value !== undefined) {
+        result[p.id] = p.value;
+      } else if (p.id in config && config[p.id] !== undefined) {
+        result[p.id] = config[p.id];
+      } else if (p.default !== undefined) {
+        result[p.id] = p.default;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Invoke `execute.init(adminConfig, context)` for the module backing
+   * the given node. Both phases of an OAuth flow go through here:
+   * `phase: 'start'` returns a redirect URL, `phase: 'complete'`
+   * receives the OAuth `code` and returns the produced config.
+   */
+  async runModuleInit(
+    nodeId: string,
+    payload: InitContextPayload,
+  ): Promise<InitResult> {
+    const node = this.workflow.nodes.find((n) => n.id === nodeId);
+    if (!node) return { status: "error", message: `Node ${nodeId} not found` };
+
+    const moduleId = (node.data as { moduleId?: string } | undefined)?.moduleId;
+    if (!moduleId) {
+      return {
+        status: "error",
+        message: `Node ${nodeId} has no moduleId`,
+      };
+    }
+
+    let fn = this.moduleCache.get(moduleId);
+    if (!fn) {
+      fn = await loadModule(this.modulesDir, moduleId);
+      this.moduleCache.set(moduleId, fn);
+    }
+
+    const fnAny = fn as ModuleExecuteFn & {
+      init?: (
+        adminConfig: Record<string, unknown>,
+        context: Record<string, unknown>,
+      ) => Promise<InitResult> | InitResult;
+    };
+    if (typeof fnAny.init !== "function") {
+      return {
+        status: "error",
+        module_id: moduleId,
+        message: `Module ${moduleId} does not implement init()`,
+      };
+    }
+
+    const adminConfig = this.resolveAdminConfig(node);
+    const ctx = {
+      userId: payload.userId,
+      agentId: this._requestContext.agentId,
+      nodeId,
+      callbackUrl: payload.callbackUrl,
+      stateToken: payload.stateToken,
+      phase: payload.phase,
+      code: payload.code,
+      state: payload.state,
+      log: (...args: unknown[]) => console.log(`[init:${nodeId}]`, ...args),
+    };
+
+    try {
+      const result = await fnAny.init(adminConfig, ctx);
+      if (!result || typeof result !== "object") {
+        return {
+          status: "error",
+          module_id: moduleId,
+          message: "init() returned invalid response",
+        };
+      }
+      return { ...result, module_id: moduleId };
+    } catch (err) {
+      return {
+        status: "error",
+        module_id: moduleId,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   /**
@@ -910,6 +1136,14 @@ export class WorkflowEngine {
           | undefined
       )?.inputs ?? [];
     const configMap = (node.data?.config as Record<string, unknown>) ?? {};
+    // Per-user overrides resolved in setUserConfig() before the run.
+    // They sit between upstream edges (higher priority) and admin config
+    // (lower priority): user settings beat the deployment-wide default.
+    const userOverride = this._userConfig.get(node.id) ?? {};
+    const effectiveConfig: Record<string, unknown> = {
+      ...configMap,
+      ...userOverride,
+    };
     for (const port of inputPorts) {
       if (!port?.id) continue;
       if (port.value !== undefined) {
@@ -918,8 +1152,11 @@ export class WorkflowEngine {
         continue;
       }
       if (inputs[port.id] !== undefined) continue; // edge provided a value
-      if (port.id in configMap && configMap[port.id] !== undefined) {
-        inputs[port.id] = configMap[port.id];
+      if (
+        port.id in effectiveConfig &&
+        effectiveConfig[port.id] !== undefined
+      ) {
+        inputs[port.id] = effectiveConfig[port.id];
         continue;
       }
       if (port.default !== undefined) {
@@ -931,7 +1168,7 @@ export class WorkflowEngine {
     // signature (reading inputs.foo instead of params.foo) work with
     // legacy workflow.json files where node.data.ports.inputs does
     // not yet mention every ex-parameter.
-    for (const [k, v] of Object.entries(configMap)) {
+    for (const [k, v] of Object.entries(effectiveConfig)) {
       if (v === undefined) continue;
       if (inputs[k] === undefined) inputs[k] = v;
     }
