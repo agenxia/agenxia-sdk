@@ -21,7 +21,7 @@ Pas de linter configure dans le repo (pas de eslint.config.js).
 src/
   server.ts          # Fastify — routes /health /docs /a2a /a2a/stream /api/sync
   workflow-engine.ts  # WorkflowEngine class — DAG executor with caching
-  llm.ts             # createLLM() — client OpenAI-compatible (optionnel)
+  llm.ts             # createLLM() + getLLMClient() — client OpenAI-compatible
   types.ts           # AgentManifest, PortDefinition, MethodDefinition
   agent-card.ts      # Agent discovery card generator
   docs.ts            # HTML doc generator
@@ -94,10 +94,16 @@ fournit `params` = `node.data.config` interpole pour compat.
 Charges via `new Function` shim (pas import/require) car les agents ont `"type": "module"`.
 Sans execute.js = passthrough.
 
-### LLM optionnel
+### LLM client
 
-`context.llm` est `undefined` si pas de LLM_API_URL + LLM_API_KEY.
-Params LLM lus depuis le workflow node config (priorite) puis env vars (fallback).
+Le SDK expose deux helpers depuis `@agenxia/sdk/llm` :
+
+- **`getLLMClient(overrides?)`** (recommandé) — auto-detecte le mode :
+  - **Mode plateforme** : si `PLATFORM_URL` + `AGENT_PLATFORM_TOKEN` sont présents (injectés par le daemon CLI ou par Coolify au démarrage), route les appels vers le proxy plateforme `${PLATFORM_URL}/api/llm/v1/chat/completions`. L'agent n'a aucun secret à gérer.
+  - **Mode standalone** : fallback sur `LLM_API_URL` + `LLM_API_KEY` du `.env` local — utile pour exécuter un agent hors de la plateforme.
+- **`createLLM({ apiUrl, apiKey, model, ... })`** — client OpenAI-compat bas niveau, à utiliser quand on veut piloter manuellement l'URL et la clé (ex. provider externe spécifique).
+
+Dans un node `execute.js`, `context.llm` est instancié automatiquement via `getLLMClient` quand le node a une `model` définie ; sinon `undefined`. Params (model, temperature, max_tokens, system_prompt) lus depuis le workflow node config en priorité, env vars en fallback.
 
 ## A2A server (src/server.ts)
 
