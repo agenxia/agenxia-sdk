@@ -227,17 +227,19 @@ that don't simply ignore it. The SDK creates the LLM client via
 (`PLATFORM_URL` + `AGENT_PLATFORM_TOKEN`) or standalone (`LLM_API_URL` +
 `LLM_API_KEY`). Workflow node config takes priority over env vars.
 
-The client exposes both `chat()` and `embed()`:
+The client exposes both `chat()` and `embed()`. Model must be supplied
+explicitly (no default) — via `overrides.model`, the `LLM_MODEL` env var,
+or the workflow node config:
 
 ```ts
 import { getLLMClient } from "@agenxia/sdk/llm";
 
-const llm = getLLMClient(); // default model: llama-3.3-70b (chat)
+const llm = getLLMClient({ model: "mistral/mistral-small" });
 const { content } = await llm.chat([
   { role: "user", content: "Bonjour" },
 ]);
 
-// For embeddings, override the model — the default is a chat model.
+// For embeddings, pass an embedding model — a chat model won't work.
 const { embeddings } = await llm.embed(
   ["premier texte", "second texte"],
   { model: "text-embedding-3-small" },

@@ -44,9 +44,9 @@ export interface LLMClient {
   /**
    * Génère des embeddings pour un texte ou un batch.
    *
-   * Note : le `model` par défaut de `getLLMClient()` est un chat model
-   * (`llama-3.3-70b`). Pour `embed()`, passe explicitement un embedding
-   * model en override (ex. `text-embedding-3-small`).
+   * Pour `embed()`, passe explicitement un embedding model en override
+   * (ex. `text-embedding-3-small`) — un chat model passé à
+   * `getLLMClient()` ne convient pas pour les embeddings.
    */
   embed(
     input: string | string[],
@@ -148,23 +148,26 @@ export function createLLM(options: LLMOptions): LLMClient {
  * Le mode plateforme est recommandé : pas de clé API à gérer dans l'agent, billing centralisé,
  * tracing par agentId, providers configurés une fois sur la plateforme.
  *
- * Note : le `model` par défaut (`llama-3.3-70b`) est un chat model. Pour
- * appeler `embed()`, passe un embedding model en override soit à
- * `getLLMClient({ model: 'text-embedding-3-small' })` soit directement à
- * `client.embed(input, { model: 'text-embedding-3-small' })`.
+ * Le model doit être fourni explicitement — soit en override (`getLLMClient({ model })`),
+ * soit via la variable d'env `LLM_MODEL`. L'absence de model lève une erreur.
  */
 export function getLLMClient(overrides?: Partial<LLMOptions>): LLMClient {
   const platformUrl = process.env.PLATFORM_URL;
   const agentToken = process.env.AGENT_PLATFORM_TOKEN;
   const agentId = process.env.AGENT_ID;
-  const defaultModel =
-    overrides?.model ?? process.env.LLM_MODEL ?? "llama-3.3-70b";
+  const resolvedModel = overrides?.model ?? process.env.LLM_MODEL;
+
+  if (!resolvedModel) {
+    throw new Error(
+      "No LLM model resolved: pass overrides.model, set LLM_MODEL env var, or configure model in node config",
+    );
+  }
 
   if (platformUrl && agentToken) {
     return createLLM({
       apiUrl: `${platformUrl.replace(/\/$/, "")}/api/llm`,
       apiKey: agentToken,
-      model: defaultModel,
+      model: resolvedModel,
       extraHeaders: agentId
         ? { "x-agent-id": agentId, "x-agent-token": agentToken }
         : { "x-agent-token": agentToken },
@@ -179,5 +182,5 @@ export function getLLMClient(overrides?: Partial<LLMOptions>): LLMClient {
       "LLM config missing: set PLATFORM_URL+AGENT_PLATFORM_TOKEN (platform mode) or LLM_API_URL+LLM_API_KEY (standalone mode)",
     );
   }
-  return createLLM({ apiUrl, apiKey, model: defaultModel, ...overrides });
+  return createLLM({ apiUrl, apiKey, model: resolvedModel, ...overrides });
 }

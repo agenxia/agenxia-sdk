@@ -2,6 +2,18 @@
 
 All notable changes to `@agenxia/sdk`.
 
+## [2.6.0] - 2026-05-05
+
+### BREAKING — `getLLMClient()` no longer falls back to a default model
+
+Previously `getLLMClient()` resolved the model via `overrides.model ?? process.env.LLM_MODEL ?? "llama-3.3-70b"`. The hardcoded fallback `"llama-3.3-70b"` is removed — callers must now provide the model explicitly via `overrides.model`, the `LLM_MODEL` env var, or (for agent modules) the workflow node config. Calling `getLLMClient()` without a resolvable model throws:
+
+```
+No LLM model resolved: pass overrides.model, set LLM_MODEL env var, or configure model in node config
+```
+
+Migration: pass `model` in the call site (`getLLMClient({ model })`), or set `LLM_MODEL` in the environment, or read it from the workflow node `params.model`.
+
 ## [2.5.0] - 2026-04-27
 
 ### Added — `embed()` on the LLM client
@@ -17,9 +29,9 @@ const { embeddings, usage } = await llm.embed(["hello", "world"]);
 // embeddings: number[][] (always, even for a single string input)
 ```
 
-The default model of `getLLMClient()` (`llama-3.3-70b`) is a chat model;
-pass an embedding model explicitly to `embed()` (or to `getLLMClient`)
-when you need vectors.
+Pass an embedding model explicitly to `embed()` (or to `getLLMClient`)
+when you need vectors — a chat model passed to `getLLMClient()` won't
+work for embeddings.
 
 New types: `EmbeddingResponse`, `LLMClient`. No breaking change on
 `chat()`.

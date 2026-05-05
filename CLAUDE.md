@@ -108,7 +108,7 @@ Le client retourné expose deux méthodes :
 - **`chat(messages, overrides?)`** → `{ content, model, usage? }` — POST `/v1/chat/completions`, format OpenAI strict (`messages: [{ role, content }]`).
 - **`embed(input, overrides?)`** → `{ embeddings: number[][], model, usage? }` — POST `/v1/embeddings`. `input` peut être `string` ou `string[]` ; `embeddings` est **toujours** un tableau de vecteurs (longueur 1 pour un input unique).
 
-**Piège** : le `model` par défaut de `getLLMClient` (`llama-3.3-70b`) est un chat model. Pour `embed()` il faut passer un embedding model en override, soit à la construction (`getLLMClient({ model: 'text-embedding-3-small' })`), soit à l'appel (`client.embed(input, { model: 'text-embedding-3-small' })`).
+**Important** : `getLLMClient` n'a pas de model par défaut (depuis 2.6.0). Le model doit toujours être fourni explicitement — soit à la construction (`getLLMClient({ model })`), soit via `LLM_MODEL` env var, soit via le workflow node config. Sinon throw. Pour `embed()` passe un embedding model dédié (`text-embedding-3-small` ou similaire) — un chat model ne convient pas.
 
 Dans un node `execute.js`, `context.llm` est instancié automatiquement via `getLLMClient` quand le node a une `model` définie ; sinon `undefined`. Params (model, temperature, max_tokens, system_prompt) lus depuis le workflow node config en priorité, env vars en fallback.
 
