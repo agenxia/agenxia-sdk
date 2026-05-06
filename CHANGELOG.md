@@ -2,6 +2,24 @@
 
 All notable changes to `@agenxia/sdk`.
 
+## [2.7.0] - 2026-05-06
+
+### Added — platform default model + image client
+
+- `getLLMClient()` no longer throws when no model is supplied. It defers
+  resolution to call time (`chat()` / `embed()`), trying `overrides.model`,
+  then `LLM_MODEL` env, then the platform's `default_llm_model` via
+  `GET /api/llm/defaults`. Modules can now stay model-agnostic; admins set
+  the default once in `/settings`.
+- New `getPlatformDefaults()` exposes `{ chat_model, image_model }` with
+  in-process caching. `resetPlatformDefaultsCache()` for tests.
+- New `getImageClient()` returns a client that targets
+  `${PLATFORM_URL}/api/llm/v1/images/generations` with the platform
+  `image_model` as default. The backend endpoint is not yet implemented,
+  so calls currently throw a clear "coming soon" error — the surface is
+  wired so modules can be written against it today.
+- `LLMOptions.model` is now optional (resolution at call time).
+
 ## [2.6.0] - 2026-05-05
 
 ### BREAKING — `getLLMClient()` no longer falls back to a default model

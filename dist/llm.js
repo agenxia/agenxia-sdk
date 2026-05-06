@@ -1,26 +1,96 @@
-// OpenAI-compatible LLM client (chat + embeddings)
+// Platform-aware LLM/image client (chat + embeddings + image generation).
+//
+// The platform proxy at ${PLATFORM_URL}/api/llm/* forwards requests to the
+// configured LiteLLM backend; credentials live on the platform, not in the
+// agent. `getLLMClient()` is the recommended entry point — it auto-detects
+// platform vs standalone mode and falls back to the platform's
+// `default_llm_model` (configurable via /settings) when the caller omits a
+// model.
+let platformDefaultsCache = null;
+/**
+ * Récupère les modèles par défaut configurés côté plateforme via
+ * `GET ${PLATFORM_URL}/api/llm/defaults`. Caché pour la durée du process —
+ * en pratique le default change rarement et un agent peut être recyclé pour
+ * le rafraîchir.
+ */
+export async function getPlatformDefaults(ctx) {
+    if (platformDefaultsCache)
+        return platformDefaultsCache;
+    const platformUrl = ctx?.platformUrl ?? process.env.PLATFORM_URL;
+    const agentToken = ctx?.agentToken ?? process.env.AGENT_PLATFORM_TOKEN;
+    const agentId = ctx?.agentId ?? process.env.AGENT_ID;
+    if (!platformUrl || !agentToken) {
+        throw new Error("Cannot fetch platform defaults: PLATFORM_URL + AGENT_PLATFORM_TOKEN required");
+    }
+    platformDefaultsCache = (async () => {
+        const url = `${platformUrl.replace(/\/$/, "")}/api/llm/defaults`;
+        const headers = {
+            Authorization: `Bearer ${agentToken}`,
+            "x-agent-token": agentToken,
+        };
+        if (agentId)
+            headers["x-agent-id"] = agentId;
+        const res = await fetch(url, { headers });
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`Failed to fetch platform defaults (${res.status}): ${body}`);
+        }
+        const json = (await res.json());
+        return {
+            chat_model: json.data?.chat_model ?? null,
+            image_model: json.data?.image_model ?? null,
+        };
+    })();
+    // Reset cache on failure so the next caller can retry.
+    platformDefaultsCache.catch(() => {
+        platformDefaultsCache = null;
+    });
+    return platformDefaultsCache;
+}
+/** Resets the platform-defaults cache. Mainly for tests. */
+export function resetPlatformDefaultsCache() {
+    platformDefaultsCache = null;
+}
 export function createLLM(options) {
-    const baseHeaders = () => ({
+    const baseHeaders = (apiKey) => ({
         "Content-Type": "application/json",
-        Authorization: `Bearer ${options.apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
         ...(options.extraHeaders ?? {}),
     });
+    // Resolves a model — explicit > options > env > platform default.
+    // Throws if nothing is resolvable.
+    const resolveModel = async (explicit, isEmbedding) => {
+        if (explicit)
+            return explicit;
+        if (options.model)
+            return options.model;
+        if (process.env.LLM_MODEL)
+            return process.env.LLM_MODEL;
+        // Last resort: ask the platform. Only meaningful if the apiUrl looks
+        // like the platform proxy — for standalone (LLM_API_URL) the call
+        // would fail anyway, so we keep the explicit error.
+        if (process.env.PLATFORM_URL && process.env.AGENT_PLATFORM_TOKEN) {
+            const defaults = await getPlatformDefaults();
+            const candidate = isEmbedding ? null : defaults.chat_model;
+            if (candidate)
+                return candidate;
+        }
+        throw new Error(isEmbedding
+            ? "No embedding model resolved: pass overrides.model — embedding models must be explicit"
+            : "No LLM model resolved: pass overrides.model, set LLM_MODEL env var, configure platform default_llm_model, or set the model in the workflow node config");
+    };
     return {
         async chat(messages, overrides) {
             const opts = { ...options, ...overrides };
+            const model = await resolveModel(overrides?.model, false);
             const allMessages = opts.systemPrompt
                 ? [{ role: "system", content: opts.systemPrompt }, ...messages]
                 : messages;
-            const headers = {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${opts.apiKey}`,
-                ...(opts.extraHeaders ?? {}),
-            };
             const res = await fetch(`${opts.apiUrl}/v1/chat/completions`, {
                 method: "POST",
-                headers,
+                headers: baseHeaders(opts.apiKey),
                 body: JSON.stringify({
-                    model: opts.model,
+                    model,
                     messages: allMessages,
                     temperature: opts.temperature ?? 0.7,
                     max_tokens: opts.maxTokens ?? 4096,
@@ -34,15 +104,15 @@ export function createLLM(options) {
             const choices = data.choices;
             return {
                 content: choices?.[0]?.message?.content ?? "",
-                model: data.model ?? opts.model,
+                model: data.model ?? model,
                 usage: data.usage,
             };
         },
         async embed(input, overrides) {
-            const model = overrides?.model ?? options.model;
+            const model = await resolveModel(overrides?.model, true);
             const res = await fetch(`${options.apiUrl}/v1/embeddings`, {
                 method: "POST",
-                headers: baseHeaders(),
+                headers: baseHeaders(options.apiKey),
                 body: JSON.stringify({ model, input }),
             });
             if (!res.ok) {
@@ -51,8 +121,6 @@ export function createLLM(options) {
             }
             const data = (await res.json());
             const items = data.data ?? [];
-            // Préserve l'ordre d'origine (OpenAI renvoie en général index croissant,
-            // mais on s'en assure si le champ est présent).
             const ordered = items.every((it) => typeof it.index === "number")
                 ? [...items].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
                 : items;
@@ -69,25 +137,24 @@ export function createLLM(options) {
  * - Mode plateforme : `PLATFORM_URL` + `AGENT_PLATFORM_TOKEN` injectés au spawn → route via le proxy LLM plateforme.
  * - Mode standalone : `LLM_API_URL` + `LLM_API_KEY` du `.env` local.
  *
- * Le mode plateforme est recommandé : pas de clé API à gérer dans l'agent, billing centralisé,
- * tracing par agentId, providers configurés une fois sur la plateforme.
+ * Le mode plateforme est recommandé : pas de clé API à gérer dans l'agent,
+ * billing centralisé, tracing par agentId, providers + default model
+ * configurés une fois sur la plateforme.
  *
- * Le model doit être fourni explicitement — soit en override (`getLLMClient({ model })`),
- * soit via la variable d'env `LLM_MODEL`. L'absence de model lève une erreur.
+ * Le model est résolu paresseusement à chaque appel `chat()` / `embed()`,
+ * dans cet ordre : `overrides.model` (call-site) → `options.model`
+ * (constructeur) → `LLM_MODEL` env → `platform_settings.default_llm_model`
+ * via `/api/llm/defaults`. Si rien n'est résolvable, l'appel throw avec un
+ * message explicite.
  */
 export function getLLMClient(overrides) {
     const platformUrl = process.env.PLATFORM_URL;
     const agentToken = process.env.AGENT_PLATFORM_TOKEN;
     const agentId = process.env.AGENT_ID;
-    const resolvedModel = overrides?.model ?? process.env.LLM_MODEL;
-    if (!resolvedModel) {
-        throw new Error("No LLM model resolved: pass overrides.model, set LLM_MODEL env var, or configure model in node config");
-    }
     if (platformUrl && agentToken) {
         return createLLM({
             apiUrl: `${platformUrl.replace(/\/$/, "")}/api/llm`,
             apiKey: agentToken,
-            model: resolvedModel,
             extraHeaders: agentId
                 ? { "x-agent-id": agentId, "x-agent-token": agentToken }
                 : { "x-agent-token": agentToken },
@@ -99,6 +166,70 @@ export function getLLMClient(overrides) {
     if (!apiUrl || !apiKey) {
         throw new Error("LLM config missing: set PLATFORM_URL+AGENT_PLATFORM_TOKEN (platform mode) or LLM_API_URL+LLM_API_KEY (standalone mode)");
     }
-    return createLLM({ apiUrl, apiKey, model: resolvedModel, ...overrides });
+    return createLLM({ apiUrl, apiKey, ...overrides });
+}
+/**
+ * Image-generation client routed through the platform proxy.
+ *
+ * NOTE: the backend endpoint `${PLATFORM_URL}/api/llm/v1/images/generations`
+ * is not implemented yet — this client surface is wired so modules can be
+ * written against it today and start working as soon as the platform side
+ * lands. Calls currently throw a clear "not implemented" error.
+ */
+export function getImageClient(overrides) {
+    const platformUrl = process.env.PLATFORM_URL;
+    const agentToken = process.env.AGENT_PLATFORM_TOKEN;
+    const agentId = process.env.AGENT_ID;
+    return {
+        async generate(prompt, callOverrides) {
+            if (!platformUrl || !agentToken) {
+                throw new Error("Image generation requires platform mode: set PLATFORM_URL + AGENT_PLATFORM_TOKEN");
+            }
+            let model = callOverrides?.model ??
+                overrides?.model ??
+                process.env.IMAGE_MODEL ??
+                undefined;
+            if (!model) {
+                const defaults = await getPlatformDefaults();
+                model = defaults.image_model ?? undefined;
+            }
+            if (!model) {
+                throw new Error("No image model resolved: pass overrides.model, set IMAGE_MODEL env var, or configure platform image_model in /settings");
+            }
+            const headers = {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${agentToken}`,
+                "x-agent-token": agentToken,
+            };
+            if (agentId)
+                headers["x-agent-id"] = agentId;
+            const url = `${platformUrl.replace(/\/$/, "")}/api/llm/v1/images/generations`;
+            const res = await fetch(url, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                    model,
+                    prompt,
+                    size: callOverrides?.size ?? overrides?.size ?? "1024x1024",
+                    n: callOverrides?.n ?? overrides?.n ?? 1,
+                }),
+            });
+            if (res.status === 404) {
+                throw new Error("Image generation endpoint not implemented yet on platform — coming in a future release");
+            }
+            if (!res.ok) {
+                const body = await res.text();
+                throw new Error(`Image API error ${res.status}: ${body}`);
+            }
+            const data = (await res.json());
+            const items = data.data ??
+                [];
+            const images = items
+                .map((it) => it.url ??
+                (it.b64_json ? `data:image/png;base64,${it.b64_json}` : ""))
+                .filter((s) => s.length > 0);
+            return { images, model: data.model ?? model };
+        },
+    };
 }
 //# sourceMappingURL=llm.js.map
