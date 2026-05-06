@@ -29,6 +29,8 @@ export type {
   LLMResponse,
   ChatMessage as LLMChatMessage,
 } from "./llm.js";
+export { sendEmail } from "./email.js";
+export type { SendEmailResult } from "./email.js";
 export { generateAgentCard } from "./agent-card.js";
 export { generateDocs } from "./docs.js";
 export * from "./a2a/index.js";

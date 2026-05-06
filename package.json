@@ -1,6 +1,6 @@
 {
   "name": "@agenxia/sdk",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "Agenxia Agent SDK — declarative agent runtime",
   "type": "module",
   "main": "dist/index.js",
@@ -26,6 +26,7 @@
     ".": "./dist/index.js",
     "./client": "./dist/a2a/client.js",
     "./server": "./dist/server.js",
-    "./llm": "./dist/llm.js"
+    "./llm": "./dist/llm.js",
+    "./email": "./dist/email.js"
   }
 }

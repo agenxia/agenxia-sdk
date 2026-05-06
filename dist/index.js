@@ -3,6 +3,7 @@ export { createAgentServer } from "./server.js";
 export { WorkflowEngine, createWorkflowEngine, loadWorkflowDefinition, defaultWorkflowPaths, } from "./workflow-engine.js";
 export { convert } from "./convert.js";
 export { createLLM } from "./llm.js";
+export { sendEmail } from "./email.js";
 export { generateAgentCard } from "./agent-card.js";
 export { generateDocs } from "./docs.js";
 export * from "./a2a/index.js";

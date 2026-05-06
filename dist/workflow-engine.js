@@ -337,9 +337,11 @@ export class WorkflowEngine {
         const ports = node.data?.ports?.inputs ?? [];
         const config = node.data?.config ?? {};
         const result = {};
+        const seen = new Set();
         for (const p of ports) {
             if (!p?.id || p.scope !== "param-admin")
                 continue;
+            seen.add(p.id);
             if (p.value !== undefined) {
                 result[p.id] = p.value;
             }
@@ -349,6 +351,14 @@ export class WorkflowEngine {
             else if (p.default !== undefined) {
                 result[p.id] = p.default;
             }
+        }
+        // Fallback for legacy nodes where data.ports.inputs is empty: surface every
+        // value from data.config, so triggers configured before manifest-port
+        // enrichment (e.g. cron expressions saved as plain config) still resolve.
+        for (const [k, v] of Object.entries(config)) {
+            if (seen.has(k) || v === undefined)
+                continue;
+            result[k] = v;
         }
         return result;
     }
@@ -439,7 +449,11 @@ export class WorkflowEngine {
             const fnAny = fn;
             if (typeof fnAny.listen !== "function")
                 continue;
-            const rawParams = node.data?.config ?? {};
+            // Resolve admin config the same way executeNode does: pinned port.value
+            // > node.data.config > manifest default. This ensures values edited via
+            // the platform's "Paramètres" panel (which writes into port.value) are
+            // honored by trigger listeners, not just by execute() calls.
+            const rawParams = this.resolveAdminConfig(node);
             const params = interpolateParams(rawParams, {});
             const nodeId = node.id;
             const context = {
