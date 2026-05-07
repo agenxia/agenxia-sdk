@@ -1,7 +1,7 @@
 // Platform-aware email client. POSTs to ${PLATFORM_URL}/api/email/send with
-// x-agent-token. Resend credentials live on the platform — agents never see
-// the API key. Modeled after getLLMClient (./llm.ts) but stateless: no client
-// object, just a single helper.
+// x-agent-token. Scaleway TEM credentials live on the platform — agents never
+// see the API key. Modeled after getLLMClient (./llm.ts) but stateless: no
+// client object, just a single helper.
 export async function sendEmail(to, subject, content) {
     const platformUrl = process.env.PLATFORM_URL;
     const agentToken = process.env.AGENT_PLATFORM_TOKEN;
@@ -14,6 +14,9 @@ export async function sendEmail(to, subject, content) {
     }
     if (!to)
         return { success: false, error: "Destinataire (to) manquant" };
+    const payload = typeof content === "string"
+        ? { to, subject, html: content }
+        : { to, subject, html: content.html, text: content.text };
     const url = `${platformUrl.replace(/\/$/, "")}/api/email/send`;
     const headers = {
         "Content-Type": "application/json",
@@ -26,7 +29,7 @@ export async function sendEmail(to, subject, content) {
         const res = await fetch(url, {
             method: "POST",
             headers,
-            body: JSON.stringify({ to, subject, html: content }),
+            body: JSON.stringify(payload),
         });
         const text = await res.text();
         if (!res.ok) {
