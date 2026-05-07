@@ -388,35 +388,47 @@ export async function createAgentServer(
     }
   });
 
-  // POST /api/sync — synchronize agent code via git pull
-  app.post("/api/sync", async (_request, reply) => {
-    const { spawnSync } = await import("node:child_process");
-    const cwd = rootDir;
+  // POST /api/sync — reload workflow in-memory.
+  // Body { pull?: boolean } — when true (default), runs `git pull origin main`
+  // first; when false, skips git and reloads from disk only. The CLI daemon
+  // calls this with pull:false after writing workflow.json directly, since
+  // a git pull would fail on the dirty working tree.
+  app.post("/api/sync", async (request, reply) => {
+    const body = (request.body ?? {}) as { pull?: boolean };
+    const shouldPull = body.pull !== false;
 
-    // Verifier qu'on est dans un repo git
-    const check = spawnSync("git", ["rev-parse", "--git-dir"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    if (check.status !== 0) {
-      return reply.code(400).send({ error: "Not a git repository" });
+    let output = "";
+
+    if (shouldPull) {
+      const { spawnSync } = await import("node:child_process");
+      const cwd = rootDir;
+
+      const check = spawnSync("git", ["rev-parse", "--git-dir"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (check.status !== 0) {
+        return reply.code(400).send({ error: "Not a git repository" });
+      }
+
+      const pull = spawnSync("git", ["pull", "origin", "main", "--ff-only"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      output = (pull.stdout + pull.stderr).trim();
+      console.log(`[sync] git pull: ${output}`);
+
+      if (pull.status !== 0) {
+        return reply.code(500).send({ error: "git pull failed", output });
+      }
+    } else {
+      console.log(`[sync] hot-reload (pull skipped)`);
     }
 
-    const pull = spawnSync("git", ["pull", "origin", "main", "--ff-only"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    const output = (pull.stdout + pull.stderr).trim();
-    console.log(`[sync] git pull: ${output}`);
-
-    if (pull.status !== 0) {
-      return reply.code(500).send({ error: "git pull failed", output });
-    }
-
-    // Reload workflow from disk after pull
+    // Reload workflow from disk
     const newDef = loadWorkflowDefinition(workflowPath);
     if (newDef) {
       try {
@@ -434,11 +446,11 @@ export async function createAgentServer(
       }
     }
 
-    // Rafraichit le lockfile post-pull pour refleter les nouvelles versions.
+    // Rafraichit le lockfile pour refleter les nouvelles versions.
     modulesLock = loadModulesLock(manifestPath);
     logModulesLock(modulesLock, "[sync]");
 
-    return reply.send({ synced: true, output });
+    return reply.send({ synced: true, output, pulled: shouldPull });
   });
 
   // -------------------------------------------------------------------------
