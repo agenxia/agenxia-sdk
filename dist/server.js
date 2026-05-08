@@ -621,22 +621,64 @@ export async function createAgentServer(options = {}) {
     });
     // GET /api/init/status?user_id=X — list init-bearing nodes and their
     // status for the given user.
+    //
+    // Source de verite du init_status (par ordre de priorite) :
+    //   1. La valeur persistee dans agent_user_module_config (set par le
+    //      handler /api/init de la plateforme apres un init() reussi, ou par
+    //      le daemon CLI via /api/agents/:id/persist-user-config en mode local).
+    //   2. Heuristique `produces` du manifest : "done" si tous les ports
+    //      declares dans `produces` sont presents dans la config persistee.
+    //      Utile pour les modules OAuth qui peuplent auth_data sans passer
+    //      par notre route persist-user-config.
     app.get("/api/init/status", async (req, reply) => {
         if (!workflowEngine) {
             return reply.code(400).send({ error: "No workflow.json found" });
         }
         const userId = req.query?.user_id;
         const initNodes = workflowEngine.listInitNodes();
-        let userConfig = null;
-        if (userId)
-            userConfig = await fetchUserConfigFromPlatform(userId);
+        let userSetup = null;
+        if (userId) {
+            const platformUrl = process.env.PLATFORM_URL;
+            const agentId = process.env.AGENT_ID;
+            const agentToken = process.env.AGENT_PLATFORM_TOKEN;
+            if (platformUrl && agentId && agentToken) {
+                try {
+                    const url = `${platformUrl.replace(/\/$/, "")}/api/agents/${encodeURIComponent(agentId)}/user-config?user_id=${encodeURIComponent(userId)}`;
+                    const res = await fetch(url, {
+                        headers: { "x-agent-id": agentId, "x-agent-token": agentToken },
+                        signal: AbortSignal.timeout(5000),
+                    });
+                    if (res.ok) {
+                        const data = (await res.json());
+                        if (data?.nodes && typeof data.nodes === "object") {
+                            userSetup = data.nodes;
+                        }
+                    }
+                }
+                catch (err) {
+                    console.warn("[init-status] user-config fetch failed:", err);
+                }
+            }
+        }
         const nodes = initNodes.map((n) => {
-            const cfg = userConfig?.[n.node_id];
-            const produces = n.produces ?? [];
-            const done = produces.length > 0 &&
-                cfg &&
-                produces.every((k) => cfg[k] !== undefined && cfg[k] !== null);
-            return { ...n, init_status: done ? "done" : "pending" };
+            const entry = userSetup?.[n.node_id];
+            let initStatus;
+            if (entry?.init_status === "done" || entry?.init_status === "error") {
+                initStatus = entry.init_status;
+            }
+            else {
+                const produces = n.produces ?? [];
+                const cfg = entry?.config;
+                const done = produces.length > 0 &&
+                    cfg &&
+                    produces.every((k) => cfg[k] !== undefined && cfg[k] !== null);
+                initStatus = done ? "done" : "pending";
+            }
+            return {
+                ...n,
+                init_status: initStatus,
+                init_error: entry?.init_error ?? null,
+            };
         });
         return reply.send({
             nodes,
