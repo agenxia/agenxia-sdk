@@ -39,6 +39,7 @@ export async function getPlatformDefaults(ctx) {
         return {
             chat_model: json.data?.chat_model ?? null,
             image_model: json.data?.image_model ?? null,
+            custom_provider: json.data?.custom_provider ?? null,
         };
     })();
     // Reset cache on failure so the next caller can retry.

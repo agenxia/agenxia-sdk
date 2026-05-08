@@ -44,9 +44,20 @@ export interface EmbeddingResponse {
   };
 }
 
+export interface PlatformCustomProvider {
+  name: string;
+  url: string;
+  api_key: string;
+}
+
 export interface PlatformDefaults {
   chat_model: string | null;
   image_model: string | null;
+  /** Si `chat_model` matche un `custom_llm_providers[].name` configure dans
+   * /settings, la plateforme renvoie ici les credentials a utiliser pour
+   * appeler l'endpoint custom directement (bypass LiteLLM). Le module
+   * llm-call/init.js s'en sert pour pre-remplir base_url et api_key. */
+  custom_provider: PlatformCustomProvider | null;
 }
 
 export interface LLMClient {
@@ -115,6 +126,7 @@ export async function getPlatformDefaults(
     return {
       chat_model: json.data?.chat_model ?? null,
       image_model: json.data?.image_model ?? null,
+      custom_provider: json.data?.custom_provider ?? null,
     };
   })();
 

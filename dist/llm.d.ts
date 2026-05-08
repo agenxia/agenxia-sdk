@@ -31,9 +31,19 @@ export interface EmbeddingResponse {
         total_tokens: number;
     };
 }
+export interface PlatformCustomProvider {
+    name: string;
+    url: string;
+    api_key: string;
+}
 export interface PlatformDefaults {
     chat_model: string | null;
     image_model: string | null;
+    /** Si `chat_model` matche un `custom_llm_providers[].name` configure dans
+     * /settings, la plateforme renvoie ici les credentials a utiliser pour
+     * appeler l'endpoint custom directement (bypass LiteLLM). Le module
+     * llm-call/init.js s'en sert pour pre-remplir base_url et api_key. */
+    custom_provider: PlatformCustomProvider | null;
 }
 export interface LLMClient {
     chat(messages: ChatMessage[], overrides?: Partial<LLMOptions>): Promise<LLMResponse>;
