@@ -40,6 +40,7 @@ export async function getPlatformDefaults(ctx) {
             chat_model: json.data?.chat_model ?? null,
             image_model: json.data?.image_model ?? null,
             custom_provider: json.data?.custom_provider ?? null,
+            timezone: json.data?.timezone ?? "Europe/Paris",
         };
     })();
     // Reset cache on failure so the next caller can retry.

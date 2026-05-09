@@ -58,6 +58,11 @@ export interface PlatformDefaults {
    * appeler l'endpoint custom directement (bypass LiteLLM). Le module
    * llm-call/init.js s'en sert pour pre-remplir base_url et api_key. */
   custom_provider: PlatformCustomProvider | null;
+  /** Fuseau horaire IANA resolu pour l'utilisateur appelant :
+   * `user.timezone` (Profile) > `platform_settings.default_timezone`
+   * (admin Settings) > `'Europe/Paris'`. Utilise par les modules qui
+   * doivent ancrer du temps a l'heure locale (ex: cron). */
+  timezone: string;
 }
 
 export interface LLMClient {
@@ -127,6 +132,7 @@ export async function getPlatformDefaults(
       chat_model: json.data?.chat_model ?? null,
       image_model: json.data?.image_model ?? null,
       custom_provider: json.data?.custom_provider ?? null,
+      timezone: json.data?.timezone ?? "Europe/Paris",
     };
   })();
 

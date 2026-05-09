@@ -766,51 +766,60 @@ export class WorkflowEngine {
         }
         // Resolve input values using the canonical hierarchy (most to least
         // specific):
-        //   1. port.value    — constant pinned in the node editor sidebar
-        //                      (overrides EVERYTHING, including upstream edges)
-        //   2. inputs[id]    — value coming from an upstream edge via
-        //                      resolveInputs (already populated before)
-        //   3. config[id]    — admin/user override saved in node.data.config
-        //                      (from the workflow "Paramètres" panel)
-        //   4. port.default  — fallback declared in the module manifest
+        //   1. user-config       — per-user values from agent_user_module_config
+        //                          (BDD), populated via setUserConfig() before the
+        //                          run. Edited from the "Paramètres" panel.
+        //   2. inputs[id]        — value from an upstream edge (already populated
+        //                          before this loop). UX rule: if a port has
+        //                          user-config, the canvas blocks edge connection;
+        //                          if it has an edge, the panel disables editing.
+        //                          So in practice 1 and 2 are mutually exclusive;
+        //                          keeping the order as a safety net for files
+        //                          edited manually.
+        //   3. port.default      — workflow-level default in workflow.json
+        //                          (edited at the canvas / via vibe coding).
+        //                          Compat: if a legacy file still has `port.value`,
+        //                          we treat it as `port.default`.
+        //   4. configMap (legacy) — node.data.config (legacy "Paramètres" panel
+        //                          target before this refactor; kept for backward
+        //                          compat with old workflows).
         //
-        // The `editableByUser` flag on a port is purely UI metadata — the engine
-        // resolves values the same way regardless. It controls whether non-owner
-        // users can edit the port value via the "Paramètres" panel.
+        // The `editableByUser` flag is purely UI metadata for a user-facing
+        // simplified "Paramètres" tab; the engine ignores it.
         const inputPorts = node.data?.ports?.inputs ?? [];
         const configMap = node.data?.config ?? {};
-        // Per-user overrides resolved in setUserConfig() before the run.
-        // They sit between upstream edges (higher priority) and admin config
-        // (lower priority): user settings beat the deployment-wide default.
         const userOverride = this._userConfig.get(node.id) ?? {};
+        for (const port of inputPorts) {
+            if (!port?.id)
+                continue;
+            // 1. user-config (per-user, BDD)
+            if (userOverride[port.id] !== undefined) {
+                inputs[port.id] = userOverride[port.id];
+                continue;
+            }
+            // 2. edge upstream
+            if (inputs[port.id] !== undefined)
+                continue;
+            // 3. workflow.json port.default (compat: legacy port.value)
+            const wfDefault = port.default ?? port.value;
+            if (wfDefault !== undefined) {
+                inputs[port.id] = wfDefault;
+                continue;
+            }
+            // 4. legacy node.data.config fallback
+            if (port.id in configMap && configMap[port.id] !== undefined) {
+                inputs[port.id] = configMap[port.id];
+            }
+        }
+        // Final fallback: any config key not yet exposed in inputs is surfaced
+        // directly. This lets modules migrated to the unified signature
+        // (reading inputs.foo instead of params.foo) work with legacy
+        // workflow.json files where node.data.ports.inputs does not yet mention
+        // every ex-parameter. user-config wins over admin config here too.
         const effectiveConfig = {
             ...configMap,
             ...userOverride,
         };
-        for (const port of inputPorts) {
-            if (!port?.id)
-                continue;
-            if (port.value !== undefined) {
-                // Pinned constant — wins over upstream edges.
-                inputs[port.id] = port.value;
-                continue;
-            }
-            if (inputs[port.id] !== undefined)
-                continue; // edge provided a value
-            if (port.id in effectiveConfig &&
-                effectiveConfig[port.id] !== undefined) {
-                inputs[port.id] = effectiveConfig[port.id];
-                continue;
-            }
-            if (port.default !== undefined) {
-                inputs[port.id] = port.default;
-            }
-        }
-        // Final fallback: any config key not yet exposed in inputs is
-        // surfaced directly. This lets modules migrated to the unified
-        // signature (reading inputs.foo instead of params.foo) work with
-        // legacy workflow.json files where node.data.ports.inputs does
-        // not yet mention every ex-parameter.
         for (const [k, v] of Object.entries(effectiveConfig)) {
             if (v === undefined)
                 continue;
