@@ -6,11 +6,11 @@
 // already loaded by the CLI or the agent itself, this is a no-op.
 import "dotenv/config";
 
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import type { AgentManifest, A2AResult, ModulesLock } from "./types.js";
+import type { AgentManifest, A2AResult } from "./types.js";
 import { A2A_ERROR_CODES } from "./a2a/types.js";
 import { generateAgentCard } from "./agent-card.js";
 import { generateDocs } from "./docs.js";
@@ -23,33 +23,6 @@ import {
   type WorkflowDefinition,
   type InitNodeMetadata,
 } from "./workflow-engine.js";
-
-/**
- * Lit `modules.lock.json` a cote du manifest si present. Le lockfile est
- * descriptif (track les versions des modules installes), pas prescriptif :
- * le runtime continue de charger ./modules/<id>/execute.js sans verification.
- */
-function loadModulesLock(manifestPath: string): ModulesLock | null {
-  const lockPath = join(dirname(manifestPath), "modules.lock.json");
-  if (!existsSync(lockPath)) return null;
-  try {
-    const raw = readFileSync(lockPath, "utf-8");
-    return JSON.parse(raw) as ModulesLock;
-  } catch (err) {
-    console.warn(`[modules] failed to parse modules.lock.json:`, err);
-    return null;
-  }
-}
-
-function logModulesLock(lock: ModulesLock | null, prefix = "[modules]"): void {
-  if (!lock?.modules) return;
-  const entries = Object.entries(lock.modules);
-  if (entries.length === 0) return;
-  const summary = entries
-    .map(([id, e]) => `${id}@${e.version}${e.pinned ? "*" : ""}`)
-    .join(", ");
-  console.log(`${prefix} lockfile: ${summary}`);
-}
 
 /**
  * Scan workflow nodes for LLM params. Returns the first node.data.config
@@ -113,11 +86,6 @@ export async function createAgentServer(
   if (workflowDef) {
     console.log(`[workflow] loaded ${workflowPath}`);
   }
-
-  // 3. Lecture optionnelle du lockfile modules. Purement informatif :
-  //    permet de tracer quelles versions sont installees au demarrage.
-  let modulesLock = loadModulesLock(manifestPath);
-  logModulesLock(modulesLock);
 
   // 4. Create LLM client. Priority: workflow node config > env vars > none.
   //    LLM is OPTIONAL — agents without any LLM field simply get undefined.
@@ -445,10 +413,6 @@ export async function createAgentServer(
         console.warn(`[sync] workflow reload failed:`, err);
       }
     }
-
-    // Rafraichit le lockfile pour refleter les nouvelles versions.
-    modulesLock = loadModulesLock(manifestPath);
-    logModulesLock(modulesLock, "[sync]");
 
     return reply.send({ synced: true, output, pulled: shouldPull });
   });
