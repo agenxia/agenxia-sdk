@@ -16,7 +16,6 @@ export type {
   StreamDelta,
   StreamMetadata,
   StreamEvent,
-  HeartbeatPayload,
   HealthResponse,
   A2AHeaders,
   A2AMethodHandler,
@@ -27,14 +26,7 @@ export type {
 export { A2A_ERROR_CODES } from "./types.js";
 
 // Client
-export {
-  callAgent,
-  discoverAgent,
-  streamChat,
-  sendHeartbeat,
-  startHeartbeat,
-  registerWithPlatform,
-} from "./client.js";
+export { callAgent, discoverAgent, streamChat } from "./client.js";
 
 // Server handlers
 export {

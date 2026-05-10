@@ -94,37 +94,4 @@ export async function* streamChat(url, messages, options) {
         }
     }
 }
-/**
- * Send a heartbeat to the platform registry.
- */
-export async function sendHeartbeat(platformUrl, payload) {
-    await fetch(`${platformUrl}/api/registry/heartbeat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    });
-}
-/**
- * Start automatic heartbeat to platform registry.
- * Returns a cleanup function to stop the interval.
- */
-export function startHeartbeat(platformUrl, payload, intervalMs = 10_000) {
-    const send = () => sendHeartbeat(platformUrl, payload).catch(() => { });
-    send(); // send immediately
-    const id = setInterval(send, intervalMs);
-    return () => clearInterval(id);
-}
-/**
- * Register an agent with the platform and start heartbeat.
- * Convenience function for local development.
- */
-export function registerWithPlatform(platformUrl, agentId, agentUrl) {
-    const url = agentUrl ?? "http://localhost:3001";
-    return startHeartbeat(platformUrl, {
-        agentId,
-        url,
-        status: "online",
-        metadata: { version: "2.0" },
-    });
-}
 //# sourceMappingURL=client.js.map

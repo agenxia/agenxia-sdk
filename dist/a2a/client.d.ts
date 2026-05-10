@@ -1,4 +1,4 @@
-import type { A2AResult, AgentCard, ChatMessage, HeartbeatPayload, StreamEvent } from "./types.js";
+import type { A2AResult, AgentCard, ChatMessage, StreamEvent } from "./types.js";
 /**
  * Call an agent's A2A endpoint with a JSON-RPC request.
  */
@@ -18,18 +18,4 @@ export declare function streamChat(url: string, messages: ChatMessage[], options
     maxDepth?: number;
     context?: string;
 }): AsyncGenerator<StreamEvent>;
-/**
- * Send a heartbeat to the platform registry.
- */
-export declare function sendHeartbeat(platformUrl: string, payload: HeartbeatPayload): Promise<void>;
-/**
- * Start automatic heartbeat to platform registry.
- * Returns a cleanup function to stop the interval.
- */
-export declare function startHeartbeat(platformUrl: string, payload: HeartbeatPayload, intervalMs?: number): () => void;
-/**
- * Register an agent with the platform and start heartbeat.
- * Convenience function for local development.
- */
-export declare function registerWithPlatform(platformUrl: string, agentId: string, agentUrl?: string): () => void;
 //# sourceMappingURL=client.d.ts.map

@@ -5,7 +5,6 @@ import type {
   A2AResult,
   AgentCard,
   ChatMessage,
-  HeartbeatPayload,
   StreamEvent,
 } from "./types.js";
 
@@ -129,51 +128,4 @@ export async function* streamChat(
       }
     }
   }
-}
-
-/**
- * Send a heartbeat to the platform registry.
- */
-export async function sendHeartbeat(
-  platformUrl: string,
-  payload: HeartbeatPayload,
-): Promise<void> {
-  await fetch(`${platformUrl}/api/registry/heartbeat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-/**
- * Start automatic heartbeat to platform registry.
- * Returns a cleanup function to stop the interval.
- */
-export function startHeartbeat(
-  platformUrl: string,
-  payload: HeartbeatPayload,
-  intervalMs = 10_000,
-): () => void {
-  const send = () => sendHeartbeat(platformUrl, payload).catch(() => {});
-  send(); // send immediately
-  const id = setInterval(send, intervalMs);
-  return () => clearInterval(id);
-}
-
-/**
- * Register an agent with the platform and start heartbeat.
- * Convenience function for local development.
- */
-export function registerWithPlatform(
-  platformUrl: string,
-  agentId: string,
-  agentUrl?: string,
-): () => void {
-  const url = agentUrl ?? "http://localhost:3001";
-  return startHeartbeat(platformUrl, {
-    agentId,
-    url,
-    status: "online",
-    metadata: { version: "2.0" },
-  });
 }
