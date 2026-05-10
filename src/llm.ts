@@ -181,15 +181,23 @@ export function createLLM(options: LLMOptions): LLMClient {
         ? [{ role: "system" as const, content: opts.systemPrompt }, ...messages]
         : messages;
 
+      // max_tokens : si non specifie, on n'envoie rien et le provider
+      // utilise son propre defaut (Gemini 2.5 Flash = 8192, OpenAI = variable
+      // selon model). Forcer un defaut bas (4096) tronquait silencieusement
+      // les reponses longues.
+      const body: Record<string, unknown> = {
+        model,
+        messages: allMessages,
+        temperature: opts.temperature ?? 0.7,
+      };
+      if (opts.maxTokens !== undefined && opts.maxTokens !== null) {
+        body.max_tokens = opts.maxTokens;
+      }
+
       const res = await fetch(opts.apiUrl, {
         method: "POST",
         headers: baseHeaders(opts.apiKey),
-        body: JSON.stringify({
-          model,
-          messages: allMessages,
-          temperature: opts.temperature ?? 0.7,
-          max_tokens: opts.maxTokens ?? 4096,
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) {
