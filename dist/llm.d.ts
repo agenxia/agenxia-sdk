@@ -1,4 +1,5 @@
 export interface LLMOptions {
+    /** URL COMPLETE du endpoint chat (OpenAI-compatible). Aucun suffixe ajoute par le SDK. */
     apiUrl: string;
     apiKey: string;
     /** Model identifier. Optional — resolved from env or platform defaults at call time. */
@@ -19,15 +20,6 @@ export interface LLMResponse {
     usage?: {
         prompt_tokens: number;
         completion_tokens: number;
-        total_tokens: number;
-    };
-}
-export interface EmbeddingResponse {
-    /** Toujours un tableau de vecteurs, même pour un input unique (longueur 1). */
-    embeddings: number[][];
-    model: string;
-    usage?: {
-        prompt_tokens: number;
         total_tokens: number;
     };
 }
@@ -52,16 +44,6 @@ export interface PlatformDefaults {
 }
 export interface LLMClient {
     chat(messages: ChatMessage[], overrides?: Partial<LLMOptions>): Promise<LLMResponse>;
-    /**
-     * Génère des embeddings pour un texte ou un batch.
-     *
-     * Pour `embed()`, passe explicitement un embedding model en override
-     * (ex. `text-embedding-3-small`) — le default plateforme est un chat
-     * model, qui ne convient pas pour les embeddings.
-     */
-    embed(input: string | string[], overrides?: {
-        model?: string;
-    }): Promise<EmbeddingResponse>;
 }
 interface PlatformContext {
     platformUrl: string;
@@ -87,10 +69,10 @@ export declare function createLLM(options: LLMOptions): LLMClient;
  * billing centralisé, tracing par agentId, providers + default model
  * configurés une fois sur la plateforme.
  *
- * Le model est résolu paresseusement à chaque appel `chat()` / `embed()`,
- * dans cet ordre : `overrides.model` (call-site) → `options.model`
- * (constructeur) → `LLM_MODEL` env → `platform_settings.default_llm_model`
- * via `/api/llm/defaults`. Si rien n'est résolvable, l'appel throw avec un
+ * Le model est résolu paresseusement à chaque appel `chat()`, dans cet
+ * ordre : `overrides.model` (call-site) → `options.model` (constructeur)
+ * → `LLM_MODEL` env → `platform_settings.default_llm_model` via
+ * `/api/llm/defaults`. Si rien n'est résolvable, l'appel throw avec un
  * message explicite.
  */
 export declare function getLLMClient(overrides?: Partial<LLMOptions>): LLMClient;

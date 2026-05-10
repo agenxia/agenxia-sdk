@@ -901,19 +901,38 @@ export class WorkflowEngine {
             const v = out[key];
             return typeof v === "string" && v !== "" ? v : null;
         };
+        // Skip outputs in error state — la sortie d'un module en echec
+        // (status='error', __error set) ne doit pas polluer le content du
+        // run. Sinon une notif/email rate masque la vraie reponse LLM.
+        const isErrored = (out) => {
+            if (!out || typeof out !== "object")
+                return false;
+            const o = out;
+            if (o.__error !== undefined && o.__error !== null)
+                return true;
+            if (typeof o.status === "string" && o.status === "error")
+                return true;
+            return false;
+        };
         // Priority 1: `response` from any executed node (LLM modules emit
         // this). Walk in reverse execution order so the most recent LLM
         // response wins in cyclic workflows.
         for (let i = executionOrder.length - 1; i >= 0; i--) {
             const id = executionOrder[i];
-            const v = getField(outputs.get(id), "response");
+            const out = outputs.get(id);
+            if (isErrored(out))
+                continue;
+            const v = getField(out, "response");
             if (v)
                 return v;
         }
         // Priority 2: `content` field anywhere (newest first).
         for (let i = executionOrder.length - 1; i >= 0; i--) {
             const id = executionOrder[i];
-            const v = getField(outputs.get(id), "content");
+            const out = outputs.get(id);
+            if (isErrored(out))
+                continue;
+            const v = getField(out, "content");
             if (v)
                 return v;
         }
@@ -925,16 +944,24 @@ export class WorkflowEngine {
         }
         for (const id of sinks) {
             const out = outputs.get(id);
+            if (isErrored(out))
+                continue;
             const m = getField(out, "message") ?? getField(out, "text");
             if (m)
                 return m;
         }
-        // Last resort: last executed output, stringified.
-        const lastKey = executionOrder[executionOrder.length - 1];
-        const last = lastKey ? outputs.get(lastKey) : undefined;
-        if (typeof last === "string")
-            return last;
-        return last ? JSON.stringify(last) : "";
+        // Last resort: last executed output, stringified. On ne ramene pas
+        // d'erreur ici non plus pour eviter la pollution.
+        for (let i = executionOrder.length - 1; i >= 0; i--) {
+            const id = executionOrder[i];
+            const last = outputs.get(id);
+            if (isErrored(last))
+                continue;
+            if (typeof last === "string")
+                return last;
+            return last ? JSON.stringify(last) : "";
+        }
+        return "";
     }
 }
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-// Platform-aware LLM/image client (chat + embeddings + image generation).
+// Platform-aware LLM/image client (chat + image generation).
 //
 // The platform proxy at ${PLATFORM_URL}/api/llm/* forwards requests to the
 // configured LiteLLM backend; credentials live on the platform, not in the
@@ -6,6 +6,13 @@
 // platform vs standalone mode and falls back to the platform's
 // `default_llm_model` (configurable via /settings) when the caller omits a
 // model.
+//
+// Convention apiUrl : `apiUrl` est l'URL COMPLETE du endpoint chat
+// (OpenAI-compatible). Le SDK ne suffixe rien. Exemples :
+//   - OpenAI       : https://api.openai.com/v1/chat/completions
+//   - Gemini       : https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+//   - Plateforme   : https://agenxia.anteika.fr/api/llm/v1/chat/completions
+// Les embeddings sont gerees par un module dedie, pas par ce client.
 let platformDefaultsCache = null;
 /**
  * Récupère les modèles par défaut configurés côté plateforme via
@@ -61,7 +68,7 @@ export function createLLM(options) {
     });
     // Resolves a model — explicit > options > env > platform default.
     // Throws if nothing is resolvable.
-    const resolveModel = async (explicit, isEmbedding) => {
+    const resolveModel = async (explicit) => {
         if (explicit)
             return explicit;
         if (options.model)
@@ -73,22 +80,19 @@ export function createLLM(options) {
         // would fail anyway, so we keep the explicit error.
         if (process.env.PLATFORM_URL && process.env.AGENT_PLATFORM_TOKEN) {
             const defaults = await getPlatformDefaults();
-            const candidate = isEmbedding ? null : defaults.chat_model;
-            if (candidate)
-                return candidate;
+            if (defaults.chat_model)
+                return defaults.chat_model;
         }
-        throw new Error(isEmbedding
-            ? "No embedding model resolved: pass overrides.model — embedding models must be explicit"
-            : "No LLM model resolved: pass overrides.model, set LLM_MODEL env var, configure platform default_llm_model, or set the model in the workflow node config");
+        throw new Error("No LLM model resolved: pass overrides.model, set LLM_MODEL env var, configure platform default_llm_model, or set the model in the workflow node config");
     };
     return {
         async chat(messages, overrides) {
             const opts = { ...options, ...overrides };
-            const model = await resolveModel(overrides?.model, false);
+            const model = await resolveModel(overrides?.model);
             const allMessages = opts.systemPrompt
                 ? [{ role: "system", content: opts.systemPrompt }, ...messages]
                 : messages;
-            const res = await fetch(`${opts.apiUrl}/v1/chat/completions`, {
+            const res = await fetch(opts.apiUrl, {
                 method: "POST",
                 headers: baseHeaders(opts.apiKey),
                 body: JSON.stringify({
@@ -110,28 +114,6 @@ export function createLLM(options) {
                 usage: data.usage,
             };
         },
-        async embed(input, overrides) {
-            const model = await resolveModel(overrides?.model, true);
-            const res = await fetch(`${options.apiUrl}/v1/embeddings`, {
-                method: "POST",
-                headers: baseHeaders(options.apiKey),
-                body: JSON.stringify({ model, input }),
-            });
-            if (!res.ok) {
-                const body = await res.text();
-                throw new Error(`LLM embeddings API error ${res.status}: ${body}`);
-            }
-            const data = (await res.json());
-            const items = data.data ?? [];
-            const ordered = items.every((it) => typeof it.index === "number")
-                ? [...items].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-                : items;
-            return {
-                embeddings: ordered.map((it) => it.embedding ?? []),
-                model: data.model ?? model,
-                usage: data.usage,
-            };
-        },
     };
 }
 /**
@@ -143,10 +125,10 @@ export function createLLM(options) {
  * billing centralisé, tracing par agentId, providers + default model
  * configurés une fois sur la plateforme.
  *
- * Le model est résolu paresseusement à chaque appel `chat()` / `embed()`,
- * dans cet ordre : `overrides.model` (call-site) → `options.model`
- * (constructeur) → `LLM_MODEL` env → `platform_settings.default_llm_model`
- * via `/api/llm/defaults`. Si rien n'est résolvable, l'appel throw avec un
+ * Le model est résolu paresseusement à chaque appel `chat()`, dans cet
+ * ordre : `overrides.model` (call-site) → `options.model` (constructeur)
+ * → `LLM_MODEL` env → `platform_settings.default_llm_model` via
+ * `/api/llm/defaults`. Si rien n'est résolvable, l'appel throw avec un
  * message explicite.
  */
 export function getLLMClient(overrides) {
@@ -155,7 +137,7 @@ export function getLLMClient(overrides) {
     const agentId = process.env.AGENT_ID;
     if (platformUrl && agentToken) {
         return createLLM({
-            apiUrl: `${platformUrl.replace(/\/$/, "")}/api/llm`,
+            apiUrl: `${platformUrl.replace(/\/$/, "")}/api/llm/v1/chat/completions`,
             apiKey: agentToken,
             extraHeaders: agentId
                 ? { "x-agent-id": agentId, "x-agent-token": agentToken }
