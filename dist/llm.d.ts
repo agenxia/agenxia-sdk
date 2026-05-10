@@ -55,8 +55,14 @@ interface PlatformContext {
  * `GET ${PLATFORM_URL}/api/llm/defaults`. Caché pour la durée du process —
  * en pratique le default change rarement et un agent peut être recyclé pour
  * le rafraîchir.
+ *
+ * Passer `force: true` pour bypasser le cache et fetch frais. Utile depuis
+ * un init.js (Reconfigurer) où le user vient de modifier ses /settings et
+ * attend que la nouvelle valeur soit prise en compte immediatement.
  */
-export declare function getPlatformDefaults(ctx?: Partial<PlatformContext>): Promise<PlatformDefaults>;
+export declare function getPlatformDefaults(ctx?: Partial<PlatformContext> & {
+    force?: boolean;
+}): Promise<PlatformDefaults>;
 /** Resets the platform-defaults cache. Mainly for tests. */
 export declare function resetPlatformDefaultsCache(): void;
 export declare function createLLM(options: LLMOptions): LLMClient;

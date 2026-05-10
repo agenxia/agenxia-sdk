@@ -83,11 +83,15 @@ let platformDefaultsCache: Promise<PlatformDefaults> | null = null;
  * `GET ${PLATFORM_URL}/api/llm/defaults`. Caché pour la durée du process —
  * en pratique le default change rarement et un agent peut être recyclé pour
  * le rafraîchir.
+ *
+ * Passer `force: true` pour bypasser le cache et fetch frais. Utile depuis
+ * un init.js (Reconfigurer) où le user vient de modifier ses /settings et
+ * attend que la nouvelle valeur soit prise en compte immediatement.
  */
 export async function getPlatformDefaults(
-  ctx?: Partial<PlatformContext>,
+  ctx?: Partial<PlatformContext> & { force?: boolean },
 ): Promise<PlatformDefaults> {
-  if (platformDefaultsCache) return platformDefaultsCache;
+  if (!ctx?.force && platformDefaultsCache) return platformDefaultsCache;
 
   const platformUrl = ctx?.platformUrl ?? process.env.PLATFORM_URL;
   const agentToken = ctx?.agentToken ?? process.env.AGENT_PLATFORM_TOKEN;
