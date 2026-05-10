@@ -368,6 +368,29 @@ export function interpolateParams(
 // can't use import() directly. Solution: read the source, wrap it in
 // a CJS shim, and evaluate with `new Function`. A real `require`
 // (via createRequire) is injected so modules can load npm packages.
+//
+// If an init.js exists next to execute.js, it's loaded the same way and
+// attached as `.init` on the exported function. This avoids forcing
+// modules to write `module.exports.init = require('./init.js')`, which
+// breaks under Node when the agent's package.json declares
+// `"type": "module"` (Bun is permissive, Node strict — divergence).
+function evalCjsFile(filePath: string): unknown {
+  const code = readFileSync(filePath, "utf-8");
+  const wrapped = `
+    const module = { exports: {} };
+    const exports = module.exports;
+    ${code}
+    return module.exports;
+  `;
+  const factory = new Function("require", "fetch", "console", wrapped) as (
+    req: (id: string) => unknown,
+    f: typeof fetch,
+    c: typeof console,
+  ) => unknown;
+  const moduleRequire = createRequire(filePath);
+  return factory(moduleRequire, globalThis.fetch, console);
+}
+
 function loadModuleSync(modulesDir: string, moduleId: string): ModuleExecuteFn {
   const execPath = join(modulesDir, moduleId, "execute.js");
   if (!existsSync(execPath)) {
@@ -375,31 +398,45 @@ function loadModuleSync(modulesDir: string, moduleId: string): ModuleExecuteFn {
     return async (inputs) => inputs as Record<string, unknown>;
   }
   try {
-    const code = readFileSync(execPath, "utf-8");
-    const wrapped = `
-      const module = { exports: {} };
-      const exports = module.exports;
-      ${code}
-      return module.exports;
-    `;
-    const factory = new Function("require", "fetch", "console", wrapped) as (
-      req: (id: string) => unknown,
-      f: typeof fetch,
-      c: typeof console,
-    ) => unknown;
-    const moduleRequire = createRequire(execPath);
-    const exported = factory(moduleRequire, globalThis.fetch, console);
-    if (typeof exported === "function") return exported as ModuleExecuteFn;
-    if (
+    const exported = evalCjsFile(execPath);
+    let fn: ModuleExecuteFn | null = null;
+    if (typeof exported === "function") {
+      fn = exported as ModuleExecuteFn;
+    } else if (
       exported &&
       typeof (exported as { default?: unknown }).default === "function"
     ) {
-      return (exported as { default: ModuleExecuteFn }).default;
+      fn = (exported as { default: ModuleExecuteFn }).default;
     }
-    console.warn(
-      `[workflow] module ${moduleId} did not export a function, using passthrough`,
-    );
-    return async (inputs) => inputs as Record<string, unknown>;
+    if (!fn) {
+      console.warn(
+        `[workflow] module ${moduleId} did not export a function, using passthrough`,
+      );
+      return async (inputs) => inputs as Record<string, unknown>;
+    }
+    // Auto-discover init.js sibling. If it errors, log and continue without
+    // .init — execute() still works, only the init endpoint will report
+    // "does not implement init()".
+    const initPath = join(modulesDir, moduleId, "init.js");
+    if (existsSync(initPath)) {
+      try {
+        const initExport = evalCjsFile(initPath);
+        const initFn =
+          typeof initExport === "function"
+            ? initExport
+            : (initExport as { default?: unknown })?.default;
+        if (typeof initFn === "function") {
+          (fn as ModuleExecuteFn & { init?: unknown }).init = initFn;
+        } else {
+          console.warn(
+            `[workflow] module ${moduleId}/init.js did not export a function`,
+          );
+        }
+      } catch (err) {
+        console.warn(`[workflow] failed to load ${moduleId}/init.js:`, err);
+      }
+    }
+    return fn;
   } catch (err) {
     console.warn(`[workflow] failed to load module ${moduleId}:`, err);
     return async (inputs) => inputs as Record<string, unknown>;

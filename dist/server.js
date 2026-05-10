@@ -13,6 +13,14 @@ import { generateAgentCard } from "./agent-card.js";
 import { generateDocs } from "./docs.js";
 import { createLLM } from "./llm.js";
 import { WorkflowEngine, defaultWorkflowPaths, loadWorkflowDefinition, } from "./workflow-engine.js";
+function escapeHtml(s) {
+    return s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
 /**
  * Scan workflow nodes for LLM params. Returns the first node.data.config
  * that carries at least one LLM field. Any module can provide them.
@@ -126,6 +134,120 @@ export async function createAgentServer(options = {}) {
         uptime: Math.floor((Date.now() - startTime) / 1000),
         version: manifest.version ?? "1.0.0",
     }));
+    // GET / — landing page friendly pour les humains qui hit l'URL agent.
+    // L'URL d'un agent reste un endpoint technique (REST API) mais ne
+    // doit pas cracher un 404 JSON. On affiche le nom + un lien vers
+    // la fiche dans agenxia-web + les endpoints utiles aux devs.
+    app.get("/", async (_req, reply) => {
+        const platformUrl = (process.env.PLATFORM_URL || "").replace(/\/$/, "");
+        const agentId = process.env.AGENT_ID || "";
+        const platformLink = platformUrl && agentId
+            ? `${platformUrl}/agents/${encodeURIComponent(agentId)}/interface`
+            : null;
+        const name = manifest.name || "Agent";
+        const description = manifest.description || "";
+        const version = manifest.version ?? "1.0.0";
+        const html = `<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(name)} — Agenxia</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: #0a0a0a;
+      color: #fafafa;
+      padding: 24px;
+    }
+    .card {
+      max-width: 560px;
+      width: 100%;
+      background: #141414;
+      border: 1px solid #262626;
+      border-radius: 16px;
+      padding: 32px;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #4ade80;
+      margin-bottom: 16px;
+    }
+    .status::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #4ade80;
+      box-shadow: 0 0 8px #4ade80;
+    }
+    h1 { margin: 0 0 8px 0; font-size: 24px; font-weight: 600; }
+    .desc { color: #a3a3a3; margin: 0 0 24px 0; font-size: 14px; line-height: 1.5; }
+    .cta {
+      display: inline-block;
+      background: #fafafa;
+      color: #0a0a0a;
+      text-decoration: none;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-weight: 500;
+      font-size: 14px;
+    }
+    .cta:hover { background: #e5e5e5; }
+    .endpoints {
+      margin-top: 32px;
+      padding-top: 24px;
+      border-top: 1px solid #262626;
+    }
+    .endpoints h2 {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #737373;
+      margin: 0 0 12px 0;
+    }
+    .endpoints ul { list-style: none; padding: 0; margin: 0; }
+    .endpoints li { font-size: 13px; padding: 4px 0; }
+    .endpoints a { color: #60a5fa; text-decoration: none; font-family: ui-monospace, monospace; }
+    .endpoints a:hover { text-decoration: underline; }
+    .meta { font-size: 11px; color: #525252; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="status">running</div>
+    <h1>${escapeHtml(name)}</h1>
+    ${description ? `<p class="desc">${escapeHtml(description)}</p>` : ""}
+    ${platformLink
+            ? `<a class="cta" href="${escapeHtml(platformLink)}">Ouvrir dans Agenxia →</a>`
+            : `<p class="desc"><em>PLATFORM_URL ou AGENT_ID non configurés — pas de lien vers la plateforme.</em></p>`}
+    <div class="endpoints">
+      <h2>Endpoints</h2>
+      <ul>
+        <li><a href="/health">/health</a> — status</li>
+        <li><a href="/.well-known/agent-card.json">/.well-known/agent-card.json</a> — agent card</li>
+        <li><a href="/docs">/docs</a> — documentation API</li>
+        <li><code style="color:#60a5fa">POST /api/start</code> — démarrer le workflow</li>
+        <li><code style="color:#60a5fa">POST /a2a</code> — JSON-RPC inter-agents</li>
+      </ul>
+    </div>
+    <div class="meta">v${escapeHtml(version)}</div>
+  </div>
+</body>
+</html>`;
+        reply.type("text/html; charset=utf-8").send(html);
+    });
     // GET /.well-known/agent-card.json
     app.get("/.well-known/agent-card.json", async () => card);
     // GET /docs
