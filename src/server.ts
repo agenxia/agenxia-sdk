@@ -734,6 +734,93 @@ export async function createAgentServer(
     }
   });
 
+  // POST /api/cron/tick — called by the platform's scheduled task every
+  // minute. Receives the per-user configs for nodes that use the `cron`
+  // module, delegates the matching logic to the module's tick() function,
+  // and fires engine.start(nodeId, {}, {userId}) for each match.
+  //
+  // Auth: shared secret (x-agent-id + x-agent-token, same pair the agent
+  // itself uses to call the platform — symmetric).
+  //
+  // Fire pattern: the route replies immediately with {fired: N}. The
+  // workflows themselves run in a background queue (serialized to avoid
+  // stomping on the engine's shared _requestContext). A future refactor
+  // could parallelize by giving each fire its own engine instance.
+  app.post("/api/cron/tick", async (req, reply) => {
+    if (!workflowEngine) {
+      return reply.code(400).send({ error: "No workflow.json found" });
+    }
+    const expectedAgentId = process.env.AGENT_ID;
+    const expectedToken = process.env.AGENT_PLATFORM_TOKEN;
+    const gotAgentId = req.headers["x-agent-id"];
+    const gotToken = req.headers["x-agent-token"];
+    if (
+      !expectedAgentId ||
+      !expectedToken ||
+      gotAgentId !== expectedAgentId ||
+      gotToken !== expectedToken
+    ) {
+      return reply.code(403).send({ error: "Forbidden" });
+    }
+
+    const body = (req.body ?? {}) as { configs?: unknown };
+    let toFire: Array<{ nodeId: string; userId: string }>;
+    try {
+      const result = await workflowEngine.runModuleTick("cron", {
+        configs: body.configs ?? [],
+        now: new Date(),
+      });
+      if (!Array.isArray(result)) {
+        return reply.send({ fired: 0, warning: "tick returned non-array" });
+      }
+      toFire = result.filter(
+        (r): r is { nodeId: string; userId: string } =>
+          !!r &&
+          typeof (r as { nodeId?: unknown }).nodeId === "string" &&
+          typeof (r as { userId?: unknown }).userId === "string",
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(500).send({ error: message });
+    }
+
+    // Fire-and-forget: launch a background serial queue so the HTTP
+    // response can return now. Errors per-fire are logged but don't
+    // affect other fires.
+    void (async () => {
+      for (const { nodeId, userId } of toFire) {
+        try {
+          workflowEngine.setRequestContext({
+            agentId: process.env.AGENT_ID,
+            platformUrl: process.env.PLATFORM_URL,
+            userId,
+          });
+          const userConfig = await (async () => {
+            try {
+              return await (
+                fetchUserConfigFromPlatform as (
+                  u: string,
+                ) => Promise<Record<string, Record<string, unknown>> | null>
+              )(userId);
+            } catch {
+              return null;
+            }
+          })();
+          if (userConfig) workflowEngine.setUserConfig(userConfig);
+          else workflowEngine.clearUserConfig();
+          await workflowEngine.start(nodeId, {});
+        } catch (err) {
+          console.error(
+            `[cron.tick] run failed user=${userId} node=${nodeId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    })();
+
+    return reply.send({ fired: toFire.length });
+  });
+
   // POST /api/init — start the init() flow for a node. Body:
   //   { node_id, user_id, callback_url, state_token? }
   // Returns the module's response: { status: 'redirect'|'done'|'error', ... }.

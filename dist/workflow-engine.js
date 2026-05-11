@@ -403,6 +403,28 @@ export class WorkflowEngine {
      * `phase: 'start'` returns a redirect URL, `phase: 'complete'`
      * receives the OAuth `code` and returns the produced config.
      */
+    /**
+     * Invoke a module's `tick()` function with the platform-provided payload.
+     * Used by the scheduled-trigger path (POST /api/cron/tick) where the
+     * platform delivers the per-user configs and the module decides which
+     * (nodeId, userId) tuples to fire. Returns whatever the module returns;
+     * the caller is responsible for acting on the result.
+     *
+     * Generic on purpose — not coupled to cron. Any module that exports
+     * `tick(payload)` can be invoked the same way.
+     */
+    async runModuleTick(moduleId, payload) {
+        let fn = this.moduleCache.get(moduleId);
+        if (!fn) {
+            fn = await loadModule(this.modulesDir, moduleId);
+            this.moduleCache.set(moduleId, fn);
+        }
+        const fnAny = fn;
+        if (typeof fnAny.tick !== "function") {
+            throw new Error(`Module ${moduleId} does not implement tick()`);
+        }
+        return await fnAny.tick(payload);
+    }
     async runModuleInit(nodeId, payload) {
         const node = this.workflow.nodes.find((n) => n.id === nodeId);
         if (!node)

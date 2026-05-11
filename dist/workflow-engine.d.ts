@@ -217,6 +217,17 @@ export declare class WorkflowEngine {
      * `phase: 'start'` returns a redirect URL, `phase: 'complete'`
      * receives the OAuth `code` and returns the produced config.
      */
+    /**
+     * Invoke a module's `tick()` function with the platform-provided payload.
+     * Used by the scheduled-trigger path (POST /api/cron/tick) where the
+     * platform delivers the per-user configs and the module decides which
+     * (nodeId, userId) tuples to fire. Returns whatever the module returns;
+     * the caller is responsible for acting on the result.
+     *
+     * Generic on purpose — not coupled to cron. Any module that exports
+     * `tick(payload)` can be invoked the same way.
+     */
+    runModuleTick(moduleId: string, payload: unknown): Promise<unknown>;
     runModuleInit(nodeId: string, payload: InitContextPayload): Promise<InitResult>;
     /**
      * Boots long-running watchers from `listen()` exports of trigger modules.
