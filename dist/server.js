@@ -497,8 +497,21 @@ export async function createAgentServer(options = {}) {
         const platformUrl = process.env.PLATFORM_URL;
         const agentId = process.env.AGENT_ID;
         const agentToken = process.env.AGENT_PLATFORM_TOKEN;
-        if (!platformUrl || !agentId || !agentToken)
+        if (!platformUrl || !agentId || !agentToken) {
+            // Sans cet env, le runtime ne peut pas merger les valeurs user_module_config
+            // dans les ports — symptôme typique : un port qui résolvait via user-config
+            // (ex. ics_url) retombe sur port.default vide. Trace explicite pour qu'on
+            // voie d'où vient le souci au lieu d'un null silencieux.
+            const missing = [
+                !platformUrl && "PLATFORM_URL",
+                !agentId && "AGENT_ID",
+                !agentToken && "AGENT_PLATFORM_TOKEN",
+            ]
+                .filter(Boolean)
+                .join(", ");
+            console.warn(`[user-config] skip — missing env: ${missing}`);
             return null;
+        }
         try {
             const url = `${platformUrl.replace(/\/$/, "")}/api/agents/${encodeURIComponent(agentId)}/user-config?user_id=${encodeURIComponent(userId)}`;
             const res = await fetch(url, {
