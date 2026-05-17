@@ -1,3 +1,11 @@
+/** Handle MCP émis par un module mcp-* (mcp-stripe, mcp-qonto, mcp-hubspot…).
+ * Forwarded vers le proxy plateforme dans le body POST sous `mcp_servers`. */
+export interface MCPServerHandle {
+    type: "url";
+    name: string;
+    url: string;
+    authorization_token?: string;
+}
 export interface LLMOptions {
     /** URL COMPLETE du endpoint chat (OpenAI-compatible). Aucun suffixe ajoute par le SDK. */
     apiUrl: string;
@@ -7,12 +15,29 @@ export interface LLMOptions {
     systemPrompt?: string;
     temperature?: number;
     maxTokens?: number;
+    /** Serveurs MCP à exposer au modèle pour ce call (ex: Stripe, Qonto). Requiert
+     * un provider Anthropic ; le proxy plateforme strip ce champ pour les autres
+     * providers. */
+    mcpServers?: MCPServerHandle[];
     /** Headers additionnels propagés à chaque requête (ex. x-agent-id pour le proxy plateforme). */
     extraHeaders?: Record<string, string>;
 }
 export interface ChatMessage {
     role: "system" | "user" | "assistant";
     content: string;
+}
+/** Bloc mcp_tool_use ou mcp_tool_result remonté par le proxy plateforme dans
+ * une extension OpenAI non-standard (`__mcp_tool_uses`). Utile pour debug et
+ * pour afficher les appels d'outils dans l'UI. */
+export interface MCPToolBlock {
+    type: "mcp_tool_use" | "mcp_tool_result";
+    id?: string;
+    name?: string;
+    server_name?: string;
+    input?: unknown;
+    tool_use_id?: string;
+    is_error?: boolean;
+    content?: unknown;
 }
 export interface LLMResponse {
     content: string;
@@ -22,6 +47,7 @@ export interface LLMResponse {
         completion_tokens: number;
         total_tokens: number;
     };
+    mcp_tool_uses?: MCPToolBlock[];
 }
 export interface PlatformCustomProvider {
     name: string;

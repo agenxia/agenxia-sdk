@@ -108,6 +108,12 @@ export function createLLM(options) {
             if (opts.maxTokens !== undefined && opts.maxTokens !== null) {
                 body.max_tokens = opts.maxTokens;
             }
+            // Serveurs MCP : transmis tels quels au proxy plateforme, qui décide
+            // s'il route vers l'API Anthropic Messages (avec beta header) ou strip
+            // selon le provider configuré.
+            if (opts.mcpServers && opts.mcpServers.length > 0) {
+                body.mcp_servers = opts.mcpServers;
+            }
             const res = await fetch(opts.apiUrl, {
                 method: "POST",
                 headers: baseHeaders(opts.apiKey),
@@ -123,6 +129,7 @@ export function createLLM(options) {
                 content: choices?.[0]?.message?.content ?? "",
                 model: data.model ?? model,
                 usage: data.usage,
+                mcp_tool_uses: data.__mcp_tool_uses,
             };
         },
     };

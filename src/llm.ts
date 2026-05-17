@@ -14,6 +14,15 @@
 //   - Plateforme   : https://agenxia.anteika.fr/api/llm/v1/chat/completions
 // Les embeddings sont gerees par un module dedie, pas par ce client.
 
+/** Handle MCP émis par un module mcp-* (mcp-stripe, mcp-qonto, mcp-hubspot…).
+ * Forwarded vers le proxy plateforme dans le body POST sous `mcp_servers`. */
+export interface MCPServerHandle {
+  type: "url";
+  name: string;
+  url: string;
+  authorization_token?: string;
+}
+
 export interface LLMOptions {
   /** URL COMPLETE du endpoint chat (OpenAI-compatible). Aucun suffixe ajoute par le SDK. */
   apiUrl: string;
@@ -23,6 +32,10 @@ export interface LLMOptions {
   systemPrompt?: string;
   temperature?: number;
   maxTokens?: number;
+  /** Serveurs MCP à exposer au modèle pour ce call (ex: Stripe, Qonto). Requiert
+   * un provider Anthropic ; le proxy plateforme strip ce champ pour les autres
+   * providers. */
+  mcpServers?: MCPServerHandle[];
   /** Headers additionnels propagés à chaque requête (ex. x-agent-id pour le proxy plateforme). */
   extraHeaders?: Record<string, string>;
 }
@@ -30,6 +43,20 @@ export interface LLMOptions {
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
+}
+
+/** Bloc mcp_tool_use ou mcp_tool_result remonté par le proxy plateforme dans
+ * une extension OpenAI non-standard (`__mcp_tool_uses`). Utile pour debug et
+ * pour afficher les appels d'outils dans l'UI. */
+export interface MCPToolBlock {
+  type: "mcp_tool_use" | "mcp_tool_result";
+  id?: string;
+  name?: string;
+  server_name?: string;
+  input?: unknown;
+  tool_use_id?: string;
+  is_error?: boolean;
+  content?: unknown;
 }
 
 export interface LLMResponse {
@@ -40,6 +67,7 @@ export interface LLMResponse {
     completion_tokens: number;
     total_tokens: number;
   };
+  mcp_tool_uses?: MCPToolBlock[];
 }
 
 export interface PlatformCustomProvider {
@@ -193,6 +221,12 @@ export function createLLM(options: LLMOptions): LLMClient {
       if (opts.maxTokens !== undefined && opts.maxTokens !== null) {
         body.max_tokens = opts.maxTokens;
       }
+      // Serveurs MCP : transmis tels quels au proxy plateforme, qui décide
+      // s'il route vers l'API Anthropic Messages (avec beta header) ou strip
+      // selon le provider configuré.
+      if (opts.mcpServers && opts.mcpServers.length > 0) {
+        body.mcp_servers = opts.mcpServers;
+      }
 
       const res = await fetch(opts.apiUrl, {
         method: "POST",
@@ -213,6 +247,7 @@ export function createLLM(options: LLMOptions): LLMClient {
         content: choices?.[0]?.message?.content ?? "",
         model: (data.model as string) ?? model,
         usage: data.usage as LLMResponse["usage"],
+        mcp_tool_uses: data.__mcp_tool_uses as MCPToolBlock[] | undefined,
       };
     },
   };
