@@ -108,9 +108,16 @@ export function createLLM(options) {
             if (opts.maxTokens !== undefined && opts.maxTokens !== null) {
                 body.max_tokens = opts.maxTokens;
             }
-            // Serveurs MCP : transmis tels quels au proxy plateforme, qui décide
-            // s'il route vers l'API Anthropic Messages (avec beta header) ou strip
-            // selon le provider configuré.
+            // Serveurs MCP : émis au top-level du body au format pivot Anthropic
+            // Messages-style. C'est un format NON-STANDARD sur l'endpoint OpenAI
+            // Chat Completions — l'infra doit donc savoir gérer :
+            //   - LiteLLM avec passthrough config qui forward `mcp_servers` vers
+            //     Anthropic `/v1/messages` avec le beta header `mcp-client-2025-11-20`
+            //   - OU custom proxy plateforme qui traduit vers OpenAI Responses
+            //     (`tools: [{type: "mcp", server_label, server_url, authorization}]`)
+            //     ou tout autre wire format provider.
+            // Le SDK ne fait PAS la translation lui-même : pas de sous-cas par
+            // provider dans le code agent.
             if (opts.mcpServers && opts.mcpServers.length > 0) {
                 body.mcp_servers = opts.mcpServers;
             }

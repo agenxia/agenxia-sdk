@@ -823,3 +823,244 @@ test("input resolution: pinned port.value wins over upstream edge", async () => 
   assert.equal(out.got, "https://pinned.example");
   h.cleanup();
 });
+
+// -----------------------------------------------------------------------------
+// Array port aggregation — plusieurs sources (mcp-stripe, mcp-qonto…)
+// branchées sur un même port `type: "array"` doivent être accumulées en array,
+// pas écrasées par "last writer wins".
+// -----------------------------------------------------------------------------
+test("array port aggregation: multiple sources accumulate into target array", async () => {
+  const h = makeHarness({
+    trig: `module.exports = async () => ({ go: true });`,
+    srcA: `module.exports = async () => ({ connector: { name: "stripe", url: "https://mcp.stripe.com" } });`,
+    srcB: `module.exports = async () => ({ connector: { name: "qonto", url: "https://mcp.qonto.com" } });`,
+    sink: `module.exports = async (inputs) => ({ got: inputs.connectors });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "trig",
+      nodes: [
+        { id: "trig", data: { moduleId: "trig" } },
+        { id: "srcA", data: { moduleId: "srcA" } },
+        { id: "srcB", data: { moduleId: "srcB" } },
+        {
+          id: "sink",
+          data: {
+            moduleId: "sink",
+            ports: {
+              inputs: [
+                { id: "connectors", label: "Connectors", type: "array" },
+              ],
+            },
+          },
+        },
+      ],
+      edges: [
+        {
+          source: "trig",
+          target: "srcA",
+          sourceHandle: "go",
+          targetHandle: "__go",
+        },
+        {
+          source: "trig",
+          target: "srcB",
+          sourceHandle: "go",
+          targetHandle: "__go",
+        },
+        {
+          source: "srcA",
+          target: "sink",
+          sourceHandle: "connector",
+          targetHandle: "connectors",
+        },
+        {
+          source: "srcB",
+          target: "sink",
+          sourceHandle: "connector",
+          targetHandle: "connectors",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "arr-agg" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.sink as Record<string, unknown>;
+  assert.ok(Array.isArray(out.got), "sink.got must be an array");
+  const arr = out.got as Array<{ name: string }>;
+  assert.equal(arr.length, 2);
+  const names = arr.map((c) => c.name).sort();
+  assert.deepEqual(names, ["qonto", "stripe"]);
+  h.cleanup();
+});
+
+// Array port: une seule source doit quand même produire un array (singleton).
+test("array port aggregation: single source still produces an array", async () => {
+  const h = makeHarness({
+    src: `module.exports = async () => ({ connector: { name: "stripe" } });`,
+    sink: `module.exports = async (inputs) => ({ got: inputs.connectors });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "src",
+      nodes: [
+        { id: "src", data: { moduleId: "src" } },
+        {
+          id: "sink",
+          data: {
+            moduleId: "sink",
+            ports: { inputs: [{ id: "connectors", type: "array" }] },
+          },
+        },
+      ],
+      edges: [
+        {
+          source: "src",
+          target: "sink",
+          sourceHandle: "connector",
+          targetHandle: "connectors",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "arr-singleton" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.sink as Record<string, unknown>;
+  assert.ok(Array.isArray(out.got));
+  assert.equal((out.got as unknown[]).length, 1);
+  h.cleanup();
+});
+
+// Array port: null/undefined sources (mcp-stripe en échec) sont filtrés.
+test("array port aggregation: null/undefined values are filtered out", async () => {
+  const h = makeHarness({
+    trig: `module.exports = async () => ({ go: true });`,
+    srcOk: `module.exports = async () => ({ connector: { name: "stripe" } });`,
+    srcKo: `module.exports = async () => ({ connector: null, __error: "boom" });`,
+    sink: `module.exports = async (inputs) => ({ got: inputs.connectors });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "trig",
+      nodes: [
+        { id: "trig", data: { moduleId: "trig" } },
+        { id: "srcOk", data: { moduleId: "srcOk" } },
+        { id: "srcKo", data: { moduleId: "srcKo" } },
+        {
+          id: "sink",
+          data: {
+            moduleId: "sink",
+            ports: { inputs: [{ id: "connectors", type: "array" }] },
+          },
+        },
+      ],
+      edges: [
+        {
+          source: "trig",
+          target: "srcOk",
+          sourceHandle: "go",
+          targetHandle: "__go",
+        },
+        {
+          source: "trig",
+          target: "srcKo",
+          sourceHandle: "go",
+          targetHandle: "__go",
+        },
+        {
+          source: "srcOk",
+          target: "sink",
+          sourceHandle: "connector",
+          targetHandle: "connectors",
+        },
+        {
+          source: "srcKo",
+          target: "sink",
+          sourceHandle: "connector",
+          targetHandle: "connectors",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "arr-filter" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.sink as Record<string, unknown>;
+  assert.ok(Array.isArray(out.got));
+  const arr = out.got as Array<{ name: string }>;
+  assert.equal(arr.length, 1);
+  assert.equal(arr[0].name, "stripe");
+  h.cleanup();
+});
+
+// Array port: si la source émet déjà un array (cas mcp-stripe v2 qui produit
+// `connector: [{...}]`), les éléments sont FLATTEN (concaténés) dans le port
+// cible, pas wrappés dans un sous-array. Permet d'avoir des port types stricts
+// alignés (array → array) sans coercion silencieuse.
+test("array port aggregation: array source is flattened, not nested", async () => {
+  const h = makeHarness({
+    trig: `module.exports = async () => ({ go: true });`,
+    srcA: `module.exports = async () => ({ connectors: [{ name: "stripe" }, { name: "stripe-test" }] });`,
+    srcB: `module.exports = async () => ({ connectors: [{ name: "qonto" }] });`,
+    sink: `module.exports = async (inputs) => ({ got: inputs.all });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "trig",
+      nodes: [
+        { id: "trig", data: { moduleId: "trig" } },
+        { id: "srcA", data: { moduleId: "srcA" } },
+        { id: "srcB", data: { moduleId: "srcB" } },
+        {
+          id: "sink",
+          data: {
+            moduleId: "sink",
+            ports: { inputs: [{ id: "all", type: "array" }] },
+          },
+        },
+      ],
+      edges: [
+        {
+          source: "trig",
+          target: "srcA",
+          sourceHandle: "go",
+          targetHandle: "__go",
+        },
+        {
+          source: "trig",
+          target: "srcB",
+          sourceHandle: "go",
+          targetHandle: "__go",
+        },
+        {
+          source: "srcA",
+          target: "sink",
+          sourceHandle: "connectors",
+          targetHandle: "all",
+        },
+        {
+          source: "srcB",
+          target: "sink",
+          sourceHandle: "connectors",
+          targetHandle: "all",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "arr-flatten" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.sink as Record<string, unknown>;
+  assert.ok(Array.isArray(out.got));
+  const arr = out.got as Array<{ name: string }>;
+  assert.equal(
+    arr.length,
+    3,
+    "should flatten srcA's 2 elements + srcB's 1 element",
+  );
+  const names = arr.map((c) => c.name).sort();
+  assert.deepEqual(names, ["qonto", "stripe", "stripe-test"]);
+  // Sanity check: aucun élément ne doit être un array imbriqué
+  for (const el of arr) {
+    assert.ok(!Array.isArray(el), "elements must be flat, not nested arrays");
+  }
+  h.cleanup();
+});

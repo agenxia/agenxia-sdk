@@ -1,5 +1,20 @@
 /** Handle MCP émis par un module mcp-* (mcp-stripe, mcp-qonto, mcp-hubspot…).
- * Forwarded vers le proxy plateforme dans le body POST sous `mcp_servers`. */
+ *
+ * Format conforme à la spec MCP officielle, identique pour les deux specs
+ * provider :
+ *   - Anthropic Messages MCP (beta `mcp-client-2025-11-20`) : envoyé dans
+ *     `mcp_servers: [{type, url, name, authorization_token}]` au top-level.
+ *   - OpenAI Responses MCP : envoyé dans `tools: [{type: "mcp", server_label,
+ *     server_url, authorization}]` (alias de nommage des mêmes champs).
+ *
+ * `authorization_token` est le token **brut**, SANS préfixe `Bearer ` :
+ * le scheme est ajouté par le serveur MCP cible selon son protocole d'auth.
+ * Préfixer côté module produirait "Bearer Bearer …" et casserait l'auth.
+ *
+ * Le SDK transmet ce handle tel quel au LLM (format pivot Anthropic
+ * Messages-style). La translation vers le wire format final du provider
+ * (chat-completions → Messages, → Responses…) est la responsabilité de
+ * l'infra (LiteLLM avec passthrough config, ou custom proxy plateforme). */
 export interface MCPServerHandle {
     type: "url";
     name: string;

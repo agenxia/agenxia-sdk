@@ -15,7 +15,22 @@
 // Les embeddings sont gerees par un module dedie, pas par ce client.
 
 /** Handle MCP émis par un module mcp-* (mcp-stripe, mcp-qonto, mcp-hubspot…).
- * Forwarded vers le proxy plateforme dans le body POST sous `mcp_servers`. */
+ *
+ * Format conforme à la spec MCP officielle, identique pour les deux specs
+ * provider :
+ *   - Anthropic Messages MCP (beta `mcp-client-2025-11-20`) : envoyé dans
+ *     `mcp_servers: [{type, url, name, authorization_token}]` au top-level.
+ *   - OpenAI Responses MCP : envoyé dans `tools: [{type: "mcp", server_label,
+ *     server_url, authorization}]` (alias de nommage des mêmes champs).
+ *
+ * `authorization_token` est le token **brut**, SANS préfixe `Bearer ` :
+ * le scheme est ajouté par le serveur MCP cible selon son protocole d'auth.
+ * Préfixer côté module produirait "Bearer Bearer …" et casserait l'auth.
+ *
+ * Le SDK transmet ce handle tel quel au LLM (format pivot Anthropic
+ * Messages-style). La translation vers le wire format final du provider
+ * (chat-completions → Messages, → Responses…) est la responsabilité de
+ * l'infra (LiteLLM avec passthrough config, ou custom proxy plateforme). */
 export interface MCPServerHandle {
   type: "url";
   name: string;
@@ -221,9 +236,16 @@ export function createLLM(options: LLMOptions): LLMClient {
       if (opts.maxTokens !== undefined && opts.maxTokens !== null) {
         body.max_tokens = opts.maxTokens;
       }
-      // Serveurs MCP : transmis tels quels au proxy plateforme, qui décide
-      // s'il route vers l'API Anthropic Messages (avec beta header) ou strip
-      // selon le provider configuré.
+      // Serveurs MCP : émis au top-level du body au format pivot Anthropic
+      // Messages-style. C'est un format NON-STANDARD sur l'endpoint OpenAI
+      // Chat Completions — l'infra doit donc savoir gérer :
+      //   - LiteLLM avec passthrough config qui forward `mcp_servers` vers
+      //     Anthropic `/v1/messages` avec le beta header `mcp-client-2025-11-20`
+      //   - OU custom proxy plateforme qui traduit vers OpenAI Responses
+      //     (`tools: [{type: "mcp", server_label, server_url, authorization}]`)
+      //     ou tout autre wire format provider.
+      // Le SDK ne fait PAS la translation lui-même : pas de sous-cas par
+      // provider dans le code agent.
       if (opts.mcpServers && opts.mcpServers.length > 0) {
         body.mcp_servers = opts.mcpServers;
       }

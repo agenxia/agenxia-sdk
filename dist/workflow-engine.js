@@ -79,14 +79,28 @@ function isReachable(sourceId, targetId, adjacency) {
  * - Edge without handles (legacy): merges the entire source output
  *   into the result via Object.assign. Preserves backwards
  *   compatibility for workflows generated before port routing.
- * - Multiple edges targeting the same `targetHandle`: last writer wins.
+ * - Port type "array" (e.g. mcp_connectors): values from one or many
+ *   edges are accumulated into an array. Permet de brancher plusieurs
+ *   sources mcp-* sur un même port array sans que la dernière écrase
+ *   les précédentes.
+ * - Other port types with multiple edges on same `targetHandle`: last
+ *   writer wins (backward compat).
  * - Back-edges (source not yet executed) are skipped upstream by the
  *   filter on `executed`.
  */
-function resolveInputs(nodeId, reverseAdj, outputs, executed) {
+function resolveInputs(nodeId, reverseAdj, outputs, executed, nodeMap) {
     const incoming = reverseAdj.get(nodeId) ?? [];
     const activeEdges = incoming.filter((e) => executed.has(e.source));
     const result = {};
+    // Build a quick lookup of port type by id for the target node so we can
+    // detect array-typed ports and aggregate accordingly.
+    const targetPorts = nodeMap.get(nodeId)?.data?.ports?.inputs ?? [];
+    const portTypeById = new Map();
+    for (const port of targetPorts) {
+        if (port?.id && typeof port.type === "string") {
+            portTypeById.set(port.id, port.type);
+        }
+    }
     for (const edge of activeEdges) {
         const src = outputs.get(edge.source);
         if (!src || typeof src !== "object")
@@ -97,10 +111,32 @@ function resolveInputs(nodeId, reverseAdj, outputs, executed) {
             typeof edge.targetHandle === "string" &&
             edge.targetHandle.length > 0;
         if (hasHandles) {
-            // Port routing: forward only the named field, under the declared
-            // target name. Missing source key is exposed as `undefined` so
-            // modules can detect "wired but no value" distinctly from "not wired".
-            result[edge.targetHandle] = srcObj[edge.sourceHandle];
+            const targetHandle = edge.targetHandle;
+            const value = srcObj[edge.sourceHandle];
+            const portType = portTypeById.get(targetHandle);
+            if (portType === "array") {
+                // Filter out null/undefined to keep array clean (a failing mcp-*
+                // source emits `connector: null` — don't pollute the downstream array).
+                if (value === undefined || value === null)
+                    continue;
+                // Si la source émet déjà un array (cas standard : mcp-stripe v2 produit
+                // `connector: [{...}]`), on FLATTEN au lieu de nester. Sinon on wrap
+                // la valeur en singleton (compat sources non-array, type `any`, etc.).
+                const toAdd = Array.isArray(value) ? value : [value];
+                const existing = result[targetHandle];
+                if (Array.isArray(existing)) {
+                    existing.push(...toAdd);
+                }
+                else {
+                    result[targetHandle] = [...toAdd];
+                }
+            }
+            else {
+                // Port routing: forward only the named field, under the declared
+                // target name. Missing source key is exposed as `undefined` so
+                // modules can detect "wired but no value" distinctly from "not wired".
+                result[targetHandle] = value;
+            }
         }
         else {
             // Legacy fallback: merge the whole output.
@@ -710,7 +746,7 @@ export class WorkflowEngine {
                 const node = nodeMap.get(nodeId);
                 if (!node || executed.has(nodeId))
                     return { nodeId, output: null, skip: true };
-                let inputs = resolveInputs(nodeId, reverseAdj, outputs, executed);
+                let inputs = resolveInputs(nodeId, reverseAdj, outputs, executed, nodeMap);
                 // For the start node, merge `values` on top of computed inputs.
                 const entry = entryInputs(nodeId);
                 if (entry) {
