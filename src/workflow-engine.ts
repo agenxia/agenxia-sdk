@@ -433,9 +433,23 @@ function evalCjsFile(filePath: string): unknown {
 }
 
 function loadModuleSync(modulesDir: string, moduleId: string): ModuleExecuteFn {
-  const execPath = join(modulesDir, moduleId, "execute.js");
+  const moduleDir = join(modulesDir, moduleId);
+  if (!existsSync(moduleDir)) {
+    // Le module n'a jamais été cloné/pushé dans le repo agent. Throw au
+    // runtime pour que le workflow plante en "error" au lieu de retourner
+    // "completed" mensonger (le passthrough silencieux masquait le bug
+    // de modules/ non commités avant un deploy remote — cf
+    // agenxia-web/CLAUDE.md § modules/ source de vérité).
+    return async () => {
+      throw new Error(
+        `Module "${moduleId}" introuvable dans ${modulesDir}. Le répertoire modules/${moduleId}/ manque dans le repo agent — vérifier qu'il a bien été commité+pushé avant le deploy.`,
+      );
+    };
+  }
+  const execPath = join(moduleDir, "execute.js");
   if (!existsSync(execPath)) {
-    // Passthrough
+    // Module présent mais sans execute.js : cas légitime (widget UI-only).
+    // On préserve le passthrough.
     return async (inputs) => inputs as Record<string, unknown>;
   }
   try {
