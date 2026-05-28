@@ -257,17 +257,23 @@ export declare class WorkflowEngine {
      * Single execution primitive of the engine. Covers both the initial
      * "run from scratch" and reactive re-execution from a widget:
      *
-     * - `nodeId` defaults to `workflow.entrypoint`. Must exist.
+     * - `nodeId` defaults to `workflow.entrypoint`. `entrypoint` is itself
+     *   optional in `workflow.json` — purely interactive agents (every run
+     *   starts from a widget) need not declare one. If neither `nodeId` nor
+     *   `workflow.entrypoint` is set, `start()` throws an explicit error.
      * - `values` are merged on top of the start node's computed inputs
      *   (which themselves come from resolveInputs on cached upstream
      *   outputs, if any). The start node then runs normally through its
      *   module (or passthrough).
-     * - Only the start node and its descendants are re-executed. Nodes
-     *   outside the descendant subgraph keep their cached outputs.
-     * - On the first call `lastOutputs` is empty; descendants whose
-     *   upstream dependencies are unresolved are simply skipped by the
-     *   scheduler.
-     * - `lastOutputs` is updated with the new outputs of executed nodes.
+     * - Pull-based dataflow: the start node, its descendants, AND any
+     *   upstream producer not yet cached are scheduled in the same run.
+     *   This lets a widget trigger work on the first call even when its
+     *   pipeline depends on an upstream source node (e.g. an MCP connector)
+     *   that was never run. Cached upstream nodes stay frozen — their value
+     *   is reused, they don't re-execute. See `uncachedAncestorsOf`.
+     * - `lastOutputs` is updated with the new outputs of executed nodes
+     *   (subgraph + uncached ancestors); cached non-runnable nodes keep
+     *   their previous value.
      *
      * Conversational workflows are a convention, not a feature: pass
      * `values: { message: "..." }` and let the edges route it where the

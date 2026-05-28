@@ -243,6 +243,88 @@ test("upstream connector is called once across 10 widget starts", async () => {
 });
 
 // -----------------------------------------------------------------------------
+// 4b. Pull-based ancestors: trigger from widget without a prior full run.
+//
+// Mirrors the real-world chat→LLM←Connector setup (e.g. agent_748 Stripe):
+//   - Connector is a pure source (no incoming edges).
+//   - LLM needs both `prompt` (from widget) AND `connector_handle` (from
+//     connector). Both edges → allResolved gate.
+//   - Widget is wired in a cycle: widget.prompt → LLM, LLM.response → widget.
+//
+// Pre-fix behavior: starting from Widget computed subgraph={Widget, LLM},
+// Connector was upstream-only and never cached → LLM skipped → content was
+// the widget's passthrough JSON.
+//
+// Post-fix: uncachedAncestorsOf({Widget, LLM}) = {Connector} → Connector
+// runs in the same call, LLM receives both inputs and produces a response.
+// On the next call, Connector is cached → not re-run.
+// -----------------------------------------------------------------------------
+test("pull-based: widget trigger pulls in uncached upstream connector", async () => {
+  const h = makeHarness({
+    Connector: `module.exports = async () => {
+      __calls.Connector = (__calls.Connector || 0) + 1;
+      return { handle: { token: "abc" } };
+    };`,
+    LLM: `module.exports = async (i) => {
+      __calls.LLM = (__calls.LLM || 0) + 1;
+      return { response: "answer to: " + i.prompt + " (handle=" + i.handle.token + ")" };
+    };`,
+    Widget: `module.exports = async (i) => i;`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "Connector",
+      nodes: [
+        { id: "Connector", data: { moduleId: "Connector" } },
+        { id: "LLM", data: { moduleId: "LLM" } },
+        { id: "Widget", data: { moduleId: "Widget" } },
+      ],
+      edges: [
+        {
+          source: "Connector",
+          sourceHandle: "handle",
+          target: "LLM",
+          targetHandle: "handle",
+        },
+        {
+          source: "Widget",
+          sourceHandle: "prompt",
+          target: "LLM",
+          targetHandle: "prompt",
+        },
+        {
+          source: "LLM",
+          sourceHandle: "response",
+          target: "Widget",
+          targetHandle: "message",
+        },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "t4b" } },
+  );
+
+  // First trigger from Widget — NO prior engine.start() call. Pre-fix this
+  // would have left LLM unrun and returned widget passthrough JSON.
+  const r1 = await engine.start("Widget", { prompt: "hello" });
+  assert.equal(h.calls.Connector, 1, "Connector pulled in by ancestor walk");
+  assert.equal(h.calls.LLM, 1, "LLM runs with both inputs resolved");
+  assert.equal(r1.content, "answer to: hello (handle=abc)");
+
+  // Second trigger — Connector is now cached, must NOT re-run.
+  const r2 = await engine.start("Widget", { prompt: "again" });
+  assert.equal(
+    h.calls.Connector,
+    1,
+    "Connector stays cached on subsequent calls",
+  );
+  assert.equal(h.calls.LLM, 2, "LLM re-runs with new prompt");
+  assert.equal(r2.content, "answer to: again (handle=abc)");
+
+  h.cleanup();
+});
+
+// -----------------------------------------------------------------------------
 // 5. Port routing: A.x → B.y forwards only x under the target name y.
 // -----------------------------------------------------------------------------
 test("port routing: A.x → B.y forwards only x, under target name y", async () => {

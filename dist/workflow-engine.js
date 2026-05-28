@@ -68,6 +68,42 @@ function isReachable(sourceId, targetId, adjacency) {
     return false;
 }
 /**
+ * Pull-based ancestor resolution. Walks reverseAdj from each node in
+ * `seed`, collecting upstream nodes that are NOT in seed and have NO
+ * cached output. These are the producers that MUST run for the seed's
+ * data dependencies to be satisfiable.
+ *
+ * - Stops at cached ancestors: their `lastOutputs` entry is reused as a
+ *   boundary, no need to walk further up.
+ * - Skips `__go` edges: those are optional triggers, not data deps. Pulling
+ *   their source in would force-run unrelated trigger nodes (cron, etc.).
+ *
+ * Used by `_start` so that triggering a widget whose pipeline transitively
+ * depends on a not-yet-run source node (e.g. an MCP connector) works on
+ * the first call, without requiring a prior full entrypoint run.
+ */
+function uncachedAncestorsOf(seed, reverseAdj, cache) {
+    const result = new Set();
+    const visited = new Set(seed);
+    const stack = [...seed];
+    while (stack.length > 0) {
+        const id = stack.pop();
+        for (const e of reverseAdj.get(id) ?? []) {
+            if (e.targetHandle === "__go")
+                continue;
+            const src = e.source;
+            if (visited.has(src))
+                continue;
+            visited.add(src);
+            if (cache.has(src))
+                continue;
+            result.add(src);
+            stack.push(src);
+        }
+    }
+    return result;
+}
+/**
  * Build the inputs object for a node by routing data from upstream
  * executed predecessors according to their edges' port handles.
  *
@@ -659,17 +695,23 @@ export class WorkflowEngine {
      * Single execution primitive of the engine. Covers both the initial
      * "run from scratch" and reactive re-execution from a widget:
      *
-     * - `nodeId` defaults to `workflow.entrypoint`. Must exist.
+     * - `nodeId` defaults to `workflow.entrypoint`. `entrypoint` is itself
+     *   optional in `workflow.json` — purely interactive agents (every run
+     *   starts from a widget) need not declare one. If neither `nodeId` nor
+     *   `workflow.entrypoint` is set, `start()` throws an explicit error.
      * - `values` are merged on top of the start node's computed inputs
      *   (which themselves come from resolveInputs on cached upstream
      *   outputs, if any). The start node then runs normally through its
      *   module (or passthrough).
-     * - Only the start node and its descendants are re-executed. Nodes
-     *   outside the descendant subgraph keep their cached outputs.
-     * - On the first call `lastOutputs` is empty; descendants whose
-     *   upstream dependencies are unresolved are simply skipped by the
-     *   scheduler.
-     * - `lastOutputs` is updated with the new outputs of executed nodes.
+     * - Pull-based dataflow: the start node, its descendants, AND any
+     *   upstream producer not yet cached are scheduled in the same run.
+     *   This lets a widget trigger work on the first call even when its
+     *   pipeline depends on an upstream source node (e.g. an MCP connector)
+     *   that was never run. Cached upstream nodes stay frozen — their value
+     *   is reused, they don't re-execute. See `uncachedAncestorsOf`.
+     * - `lastOutputs` is updated with the new outputs of executed nodes
+     *   (subgraph + uncached ancestors); cached non-runnable nodes keep
+     *   their previous value.
      *
      * Conversational workflows are a convention, not a feature: pass
      * `values: { message: "..." }` and let the edges route it where the
@@ -697,19 +739,38 @@ export class WorkflowEngine {
         // frozen: its cached output is reused as-is.
         const descendants = descendantsOf(startId, adjacency);
         const subgraph = new Set([startId, ...descendants]);
+        // Pull-based ancestor resolution: also schedule upstream producers
+        // that the subgraph depends on but that have no cached output. Without
+        // this, a widget trigger whose pipeline needs an upstream connector
+        // never run (e.g. chat → LLM ← Stripe connector) would deadlock on the
+        // `allResolved` gate — the LLM would wait forever for an input whose
+        // producer is never scheduled. Cached ancestors stay frozen (boundary).
+        const requiredAncestors = uncachedAncestorsOf(subgraph, reverseAdj, this.lastOutputs);
+        const runnable = new Set([...subgraph, ...requiredAncestors]);
         // Seed outputs from the cache, then drop stale entries for nodes
-        // we are about to re-execute.
+        // we are about to (re-)execute.
         const outputs = new Map(this.lastOutputs);
-        for (const id of subgraph)
+        for (const id of runnable)
             outputs.delete(id);
-        // Seed `executed` with every non-subgraph node that has a cached
+        // Seed `executed` with every non-runnable node that has a cached
         // output: from the scheduler's point of view they are done.
         const executed = new Set();
         for (const [id] of nodeMap) {
-            if (!subgraph.has(id) && this.lastOutputs.has(id))
+            if (!runnable.has(id) && this.lastOutputs.has(id))
                 executed.add(id);
         }
+        // initialReady: startId + any ancestor whose predecessors are already
+        // resolved (cached/executed) or absent. Pure sources (no incoming
+        // edges, e.g. a connector module) satisfy this trivially. Intermediate
+        // ancestors with uncached preds cascade naturally via nextReady once
+        // their preds run.
+        const isPredResolved = (e) => e.targetHandle === "__go" || executed.has(e.source);
         const initialReady = [startId];
+        for (const id of requiredAncestors) {
+            const incoming = reverseAdj.get(id) ?? [];
+            if (incoming.every(isPredResolved))
+                initialReady.push(id);
+        }
         const executionOrder = await this.executeBatches({
             nodeMap,
             adjacency,
@@ -717,17 +778,17 @@ export class WorkflowEngine {
             outputs,
             executed,
             initialReady,
-            allowedNodes: subgraph,
+            allowedNodes: runnable,
             // Merge `values` on top of resolveInputs for the start node only.
             entryInputs: (id) => (id === startId ? values : null),
             emit,
         });
         const content = this.extractContent(outputs, adjacency, executionOrder);
         console.log(`[workflow] start from ${startId} complete — executed=[${executionOrder.join(", ")}] content="${content.slice(0, 80)}"`);
-        // Commit new outputs to the persistent cache. Non-subgraph nodes
+        // Commit new outputs to the persistent cache. Non-runnable nodes
         // keep their previous value. Also remember the extracted content
         // so getState() can serve it without re-running anything.
-        for (const id of subgraph) {
+        for (const id of runnable) {
             if (outputs.has(id))
                 this.lastOutputs.set(id, outputs.get(id));
         }
