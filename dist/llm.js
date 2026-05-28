@@ -57,7 +57,14 @@ export function resetPlatformDefaultsCache() {
 // format (`tools: [{type: "function", ...}]`). Works with ANY OpenAI-compat
 // provider — no native MCP support required from the upstream LLM.
 // ---------------------------------------------------------------------------
-const MCP_MAX_ITERATIONS = 10;
+// Cap sur le nombre d'iterations de la boucle MCP (LLM → tool_call → tool_result → LLM…).
+// Garde-fou anti boucle infinie et anti facture explosive. Si on atteint le cap
+// sans que le modele ait emis une reponse finale (toolCalls.length === 0 → break
+// avec finalContent), on fait un dernier call SANS tools pour forcer la synthese
+// (cf runWithMcpClients). Le cap doit donc rester moderé : un modele qui chaine
+// > N appels avant de conclure produira de toutes facons une reponse souvent
+// hallucinée ou tronquée.
+const MCP_MAX_ITERATIONS = 15;
 const MCP_TOOL_NAME_SEP = "__";
 /** Open one MCP client per declared server. Uses Streamable HTTP transport
  * (modern, works with Stripe/Anthropic-hosted MCP servers). Auth via Bearer
@@ -219,6 +226,42 @@ async function runWithMcpClients(mcpServers, initialMessages, model, opts, callC
                     tool_call_id: tc.id,
                     content: result.content,
                 });
+            }
+        }
+        // Force-summarize : si on est sorti de la boucle SANS reponse finale (cap
+        // atteint en chaine de tool_calls), faire un dernier appel SANS tools pour
+        // obliger le modele a synthetiser ce qu'il a deja appris. Sans ca,
+        // finalContent reste "" et l'utilisateur voit une reponse vide (le bug
+        // observe sur des prompts complexes type "trouve les emails des clients
+        // qui ont paye X cette annee" qui chainent list_invoices + N fetches).
+        if (!finalContent && mcpToolUses.length > 0) {
+            convo.push({
+                role: "user",
+                content: "Tu as atteint la limite d'appels d'outils. Reponds maintenant en " +
+                    "synthese a la question initiale, en utilisant uniquement les " +
+                    "informations deja collectees ci-dessus. Si elles sont insuffisantes, " +
+                    "dis-le clairement et indique ce qui manque.",
+            });
+            try {
+                const body = {
+                    model,
+                    messages: convo,
+                    temperature: opts.temperature ?? 0.7,
+                    // PAS de `tools` — on force la synthese texte.
+                };
+                if (opts.maxTokens !== undefined && opts.maxTokens !== null) {
+                    body.max_tokens = opts.maxTokens;
+                }
+                const data = await callChatCompletions(body, opts.apiUrl, opts.apiKey);
+                const msg = data.choices?.[0]?.message;
+                finalContent = msg?.content ?? "";
+                if (data.usage)
+                    finalUsage = data.usage;
+            }
+            catch (err) {
+                // Sur echec de la synthese forcee, on laisse finalContent vide ;
+                // l'appelant verra response="" et pourra remonter une erreur claire.
+                console.warn("[llm] force-summarize failed:", err instanceof Error ? err.message : String(err));
             }
         }
     }
