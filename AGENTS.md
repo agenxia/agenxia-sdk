@@ -1,4 +1,4 @@
-# CLAUDE.md — @agenxia/sdk
+# AGENTS.md — @agenxia/sdk
 
 ## What is this
 
@@ -22,7 +22,6 @@ src/
   server.ts          # Fastify — routes /health /docs /a2a /a2a/stream /api/sync
   workflow-engine.ts  # WorkflowEngine class — DAG executor with caching
   llm.ts             # createLLM() + getLLMClient() — client OpenAI-compatible (chat + embeddings)
-  knowledge.ts       # openKnowledgeStore() — KB vectorielle agent-side (bun:sqlite + cosinus JS)
   types.ts           # AgentManifest, PortDefinition, MethodDefinition
   agent-card.ts      # Agent discovery card generator
   docs.ts            # HTML doc generator
@@ -112,30 +111,6 @@ Le client retourné expose deux méthodes :
 **Important** : `getLLMClient` n'a pas de model par défaut (depuis 2.6.0). Le model doit toujours être fourni explicitement — soit à la construction (`getLLMClient({ model })`), soit via `LLM_MODEL` env var, soit via le workflow node config. Sinon throw. Pour `embed()` passe un embedding model dédié (`text-embedding-3-small` ou similaire) — un chat model ne convient pas.
 
 Dans un node `execute.js`, `context.llm` est instancié automatiquement via `getLLMClient` quand le node a une `model` définie ; sinon `undefined`. Params (model, temperature, max_tokens, system_prompt) lus depuis le workflow node config en priorité, env vars en fallback.
-
-### Knowledge store (RAG agent-side)
-
-`@agenxia/sdk/knowledge` expose `openKnowledgeStore(opts?)` — une KB vectorielle
-**côté agent**, stockée dans un fichier SQLite (`bun:sqlite`) :
-`${AGENT_DATA_DIR || cwd/data}/knowledge.db`. Similarité cosinus calculée en JS
-(pas d'extension native, pas de pgvector). Aucune donnée client ne transite par
-la DB plateforme — seuls les embeddings passent par `llm.embed()`.
-
-```js
-const { openKnowledgeStore, chunkText } = await import('@agenxia/sdk/knowledge');
-const store = openKnowledgeStore();
-store.ingest([{ content, embedding, sourceId, namespace, metadata }]); // vecteurs déjà calculés
-const hits = store.searchByVector(queryVec, { topK: 5, namespace, threshold });
-const dump = store.export();            // JSON portable (vecteurs base64)
-store.import(dump, { replace: true });  // pour cloner un agent + sa data
-store.close();
-```
-
-Persistance : survit là où le disque survit (daemon local, agent auto-hébergé) ;
-éphémère sur l'instance mutualisée de la plateforme — **assumé** (un client qui
-veut de la durabilité clone/déploie son propre agent). `data/` + `*.db` sont
-gitignorés dans le template d'agent → jamais commités sur GitHub. Utilisé par les
-modules `knowledge-ingest` / `knowledge-retrieve`.
 
 ## A2A server (src/server.ts)
 

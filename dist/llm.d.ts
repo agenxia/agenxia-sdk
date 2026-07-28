@@ -83,8 +83,25 @@ export interface PlatformDefaults {
      * doivent ancrer du temps a l'heure locale (ex: cron). */
     timezone: string;
 }
+export interface EmbeddingOptions {
+    /** Embedding model identifier (ex. `text-embedding-3-small`). Un chat model
+     * ne convient pas. Résolu via overrides.model > `EMBED_MODEL` env, sinon throw. */
+    model?: string;
+    /** Dimensions de sortie, si le provider le supporte (text-embedding-3-*). */
+    dimensions?: number;
+}
+export interface EmbeddingResponse {
+    /** Toujours un tableau de vecteurs (longueur 1 pour un input string unique). */
+    embeddings: number[][];
+    model: string;
+    usage?: {
+        prompt_tokens: number;
+        total_tokens: number;
+    };
+}
 export interface LLMClient {
     chat(messages: ChatMessage[], overrides?: Partial<LLMOptions>): Promise<LLMResponse>;
+    embed(input: string | string[], overrides?: EmbeddingOptions): Promise<EmbeddingResponse>;
 }
 interface PlatformContext {
     platformUrl: string;

@@ -29,6 +29,14 @@ export type {
   LLMResponse,
   ChatMessage as LLMChatMessage,
 } from "./llm.js";
+export { openKnowledgeStore, chunkText } from "./knowledge.js";
+export type {
+  KnowledgeStore,
+  KnowledgeStoreOptions,
+  KnowledgeChunkInput,
+  SearchResult,
+  KnowledgeExport,
+} from "./knowledge.js";
 export { sendEmail } from "./email.js";
 export type { SendEmailResult } from "./email.js";
 export { generateAgentCard } from "./agent-card.js";

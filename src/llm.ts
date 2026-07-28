@@ -15,7 +15,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 //   - OpenAI       : https://api.openai.com/v1/chat/completions
 //   - Gemini       : https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
 //   - Plateforme   : https://agenxia.anteika.fr/api/llm/v1/chat/completions
-// Les embeddings sont gerees par un module dedie, pas par ce client.
+// Les embeddings passent par `embed()` (POST /v1/embeddings), avec un model
+// d'embedding dedie (overrides.model ou EMBED_MODEL env) distinct du chat model.
 
 /** Handle MCP émis par un module mcp-* (mcp-stripe, mcp-qonto, mcp-hubspot…).
  *
@@ -109,11 +110,33 @@ export interface PlatformDefaults {
   timezone: string;
 }
 
+export interface EmbeddingOptions {
+  /** Embedding model identifier (ex. `text-embedding-3-small`). Un chat model
+   * ne convient pas. Résolu via overrides.model > `EMBED_MODEL` env, sinon throw. */
+  model?: string;
+  /** Dimensions de sortie, si le provider le supporte (text-embedding-3-*). */
+  dimensions?: number;
+}
+
+export interface EmbeddingResponse {
+  /** Toujours un tableau de vecteurs (longueur 1 pour un input string unique). */
+  embeddings: number[][];
+  model: string;
+  usage?: {
+    prompt_tokens: number;
+    total_tokens: number;
+  };
+}
+
 export interface LLMClient {
   chat(
     messages: ChatMessage[],
     overrides?: Partial<LLMOptions>,
   ): Promise<LLMResponse>;
+  embed(
+    input: string | string[],
+    overrides?: EmbeddingOptions,
+  ): Promise<EmbeddingResponse>;
 }
 
 interface PlatformContext {
@@ -570,6 +593,55 @@ export function createLLM(options: LLMOptions): LLMClient {
         opts,
         callChatCompletions,
       );
+    },
+
+    async embed(
+      input: string | string[],
+      overrides?: EmbeddingOptions,
+    ): Promise<EmbeddingResponse> {
+      // L'embedding model est distinct du chat model : on ne tombe jamais sur
+      // options.model (qui est le chat model). overrides.model > EMBED_MODEL env.
+      const model = overrides?.model ?? process.env.EMBED_MODEL;
+      if (!model) {
+        throw new Error(
+          "No embedding model resolved: pass overrides.model or set EMBED_MODEL env var (ex: text-embedding-3-small)",
+        );
+      }
+
+      // options.apiUrl est l'URL chat/completions. On dérive l'endpoint
+      // embeddings : .../chat/completions → .../embeddings. Fonctionne pour le
+      // proxy plateforme comme pour un endpoint OpenAI-compatible direct.
+      const url = /\/chat\/completions\/?$/.test(options.apiUrl)
+        ? options.apiUrl.replace(/\/chat\/completions\/?$/, "/embeddings")
+        : `${options.apiUrl.replace(/\/$/, "")}/embeddings`;
+
+      const inputs = Array.isArray(input) ? input : [input];
+      const body: Record<string, unknown> = { model, input: inputs };
+      if (overrides?.dimensions !== undefined) {
+        body.dimensions = overrides.dimensions;
+      }
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: baseHeaders(options.apiKey),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Embedding API error ${res.status}: ${text}`);
+      }
+
+      const data = (await res.json()) as {
+        data?: Array<{ embedding: number[] }>;
+        model?: string;
+        usage?: EmbeddingResponse["usage"];
+      };
+      const embeddings = (data.data ?? []).map((d) => d.embedding);
+      return {
+        embeddings,
+        model: data.model ?? model,
+        usage: data.usage,
+      };
     },
   };
 }

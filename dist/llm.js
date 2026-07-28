@@ -357,6 +357,41 @@ export function createLLM(options) {
             //   MCP_MAX_ITERATIONS (garde-fou anti boucle infinie).
             return runWithMcpClients(opts.mcpServers, allMessages, model, opts, callChatCompletions);
         },
+        async embed(input, overrides) {
+            // L'embedding model est distinct du chat model : on ne tombe jamais sur
+            // options.model (qui est le chat model). overrides.model > EMBED_MODEL env.
+            const model = overrides?.model ?? process.env.EMBED_MODEL;
+            if (!model) {
+                throw new Error("No embedding model resolved: pass overrides.model or set EMBED_MODEL env var (ex: text-embedding-3-small)");
+            }
+            // options.apiUrl est l'URL chat/completions. On dérive l'endpoint
+            // embeddings : .../chat/completions → .../embeddings. Fonctionne pour le
+            // proxy plateforme comme pour un endpoint OpenAI-compatible direct.
+            const url = /\/chat\/completions\/?$/.test(options.apiUrl)
+                ? options.apiUrl.replace(/\/chat\/completions\/?$/, "/embeddings")
+                : `${options.apiUrl.replace(/\/$/, "")}/embeddings`;
+            const inputs = Array.isArray(input) ? input : [input];
+            const body = { model, input: inputs };
+            if (overrides?.dimensions !== undefined) {
+                body.dimensions = overrides.dimensions;
+            }
+            const res = await fetch(url, {
+                method: "POST",
+                headers: baseHeaders(options.apiKey),
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`Embedding API error ${res.status}: ${text}`);
+            }
+            const data = (await res.json());
+            const embeddings = (data.data ?? []).map((d) => d.embedding);
+            return {
+                embeddings,
+                model: data.model ?? model,
+                usage: data.usage,
+            };
+        },
     };
 }
 /**
