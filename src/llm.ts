@@ -92,16 +92,17 @@ export interface LLMResponse {
 export interface PlatformCustomProvider {
   name: string;
   url: string;
-  api_key: string;
 }
 
 export interface PlatformDefaults {
   chat_model: string | null;
   image_model: string | null;
   /** Si `chat_model` matche un `custom_llm_providers[].name` configure dans
-   * /settings, la plateforme renvoie ici les credentials a utiliser pour
-   * appeler l'endpoint custom directement (bypass LiteLLM). Le module
-   * llm-call/init.js s'en sert pour pre-remplir base_url et api_key. */
+   * /settings, la plateforme renvoie ici son nom et son URL — a titre
+   * informatif. L'`api_key` n'est jamais servie : le proxy plateforme
+   * `/api/llm/v1/chat/completions` resout le provider et applique sa cle
+   * cote serveur. Un agent qui veut appeler un endpoint en direct doit
+   * fournir sa propre cle (mode standalone). */
   custom_provider: PlatformCustomProvider | null;
   /** Fuseau horaire IANA resolu pour l'utilisateur appelant :
    * `user.timezone` (Profile) > `platform_settings.default_timezone`
@@ -464,8 +465,7 @@ async function runWithMcpClients(
         const data = await callChatCompletions(body, opts.apiUrl, opts.apiKey);
         const msg = (
           data.choices as
-            | Array<{ message?: { content?: string | null } }>
-            | undefined
+            Array<{ message?: { content?: string | null } }> | undefined
         )?.[0]?.message;
         finalContent = msg?.content ?? "";
         if (data.usage) finalUsage = data.usage as LLMResponse["usage"];
@@ -568,8 +568,7 @@ export function createLLM(options: LLMOptions): LLMClient {
         }
         const data = await callChatCompletions(body, opts.apiUrl, opts.apiKey);
         const choices = data.choices as
-          | Array<{ message: { content: string } }>
-          | undefined;
+          Array<{ message: { content: string } }> | undefined;
         return {
           content: choices?.[0]?.message?.content ?? "",
           model: (data.model as string) ?? model,

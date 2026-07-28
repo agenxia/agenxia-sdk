@@ -67,15 +67,16 @@ export interface LLMResponse {
 export interface PlatformCustomProvider {
     name: string;
     url: string;
-    api_key: string;
 }
 export interface PlatformDefaults {
     chat_model: string | null;
     image_model: string | null;
     /** Si `chat_model` matche un `custom_llm_providers[].name` configure dans
-     * /settings, la plateforme renvoie ici les credentials a utiliser pour
-     * appeler l'endpoint custom directement (bypass LiteLLM). Le module
-     * llm-call/init.js s'en sert pour pre-remplir base_url et api_key. */
+     * /settings, la plateforme renvoie ici son nom et son URL — a titre
+     * informatif. L'`api_key` n'est jamais servie : le proxy plateforme
+     * `/api/llm/v1/chat/completions` resout le provider et applique sa cle
+     * cote serveur. Un agent qui veut appeler un endpoint en direct doit
+     * fournir sa propre cle (mode standalone). */
     custom_provider: PlatformCustomProvider | null;
     /** Fuseau horaire IANA resolu pour l'utilisateur appelant :
      * `user.timezone` (Profile) > `platform_settings.default_timezone`
