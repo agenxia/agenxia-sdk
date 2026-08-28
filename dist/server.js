@@ -12,6 +12,7 @@ import { A2A_ERROR_CODES } from "./a2a/types.js";
 import { generateAgentCard } from "./agent-card.js";
 import { generateDocs } from "./docs.js";
 import { createLLM } from "./llm.js";
+import { buildCompleteInitContext } from "./oauth-init.js";
 import { WorkflowEngine, defaultWorkflowPaths, loadWorkflowDefinition, } from "./workflow-engine.js";
 function escapeHtml(s) {
     return s
@@ -769,15 +770,15 @@ export async function createAgentServer(options = {}) {
         return reply.send(result);
     });
     // POST /api/init/complete — second leg of an OAuth init. Body:
-    //   { node_id, user_id, code, state }
+    //   { node_id, user_id, code, state, callback_url }
     app.post("/api/init/complete", async (req, reply) => {
         if (!workflowEngine) {
             return reply.code(400).send({ error: "No workflow.json found" });
         }
         const body = (req.body ?? {});
-        if (!body.node_id || !body.user_id || !body.code) {
+        if (!body.node_id || !body.user_id || !body.code || !body.callback_url) {
             return reply.code(400).send({
-                error: "node_id, user_id, code are required",
+                error: "node_id, user_id, code, callback_url are required",
             });
         }
         workflowEngine.setRequestContext({
@@ -785,13 +786,12 @@ export async function createAgentServer(options = {}) {
             platformUrl: process.env.PLATFORM_URL,
             userId: body.user_id,
         });
-        const result = await workflowEngine.runModuleInit(body.node_id, {
-            phase: "complete",
-            userId: body.user_id,
-            callbackUrl: "",
+        const result = await workflowEngine.runModuleInit(body.node_id, buildCompleteInitContext({
+            user_id: body.user_id,
             code: body.code,
             state: body.state,
-        });
+            callback_url: body.callback_url,
+        }));
         return reply.send(result);
     });
     // GET /api/init/status?user_id=X — list init-bearing nodes and their
