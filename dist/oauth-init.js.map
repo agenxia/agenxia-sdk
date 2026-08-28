@@ -1,0 +1,1 @@
+{"version":3,"file":"oauth-init.js","sourceRoot":"","sources":["../src/oauth-init.ts"],"names":[],"mappings":"AASA,MAAM,UAAU,wBAAwB,CAAC,IAAsB;IAC7D,OAAO;QACL,KAAK,EAAE,UAAU;QACjB,MAAM,EAAE,IAAI,CAAC,OAAO;QACpB,WAAW,EAAE,IAAI,CAAC,YAAY;QAC9B,IAAI,EAAE,IAAI,CAAC,IAAI;QACf,KAAK,EAAE,IAAI,CAAC,KAAK;KAClB,CAAC;AACJ,CAAC"}
