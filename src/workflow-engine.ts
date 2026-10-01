@@ -643,8 +643,8 @@ export class WorkflowEngine {
 
   // Per-(userId, nodeId) override config, populated by setUserConfig()
   // before each run from the platform's user_module_config store.
-  // Resolution order: pinned port > upstream edge > userOverride >
-  //                   node.data.config > port.default.
+  // Resolution order (cf executeNode): userOverride > upstream edge >
+  //                   port.default (legacy port.value) > node.data.config.
   private _userConfig: Map<string, Record<string, unknown>> = new Map();
 
   // Persistent output cache across start() calls. Reads: used as

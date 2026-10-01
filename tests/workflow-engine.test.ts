@@ -780,7 +780,7 @@ test("input resolution: port.default is used when nothing else provides a value"
   h.cleanup();
 });
 
-test("input resolution: config[id] overrides port.default", async () => {
+test("input resolution: port.default wins over legacy node.data.config", async () => {
   const h = makeHarness({
     A: `module.exports = async (inputs) => ({ got: inputs.url });`,
   });
@@ -812,7 +812,9 @@ test("input resolution: config[id] overrides port.default", async () => {
   );
   await engine.start();
   const out = engine.getState().nodeOutputs.A as Record<string, unknown>;
-  assert.equal(out.got, "https://from-config.example");
+  // Depuis 87e14e1 : node.data.config n'est qu'un repli quand le port n'a
+  // pas de default (anciens workflows d'avant le panneau Paramètres).
+  assert.equal(out.got, "https://default.example");
   h.cleanup();
 });
 
@@ -861,7 +863,7 @@ test("input resolution: upstream edge overrides config and default", async () =>
   h.cleanup();
 });
 
-test("input resolution: pinned port.value wins over upstream edge", async () => {
+test("input resolution: upstream edge wins over a legacy port.value", async () => {
   const h = makeHarness({
     src: `module.exports = async () => ({ url: "https://from-edge.example" });`,
     dst: `module.exports = async (inputs) => ({ got: inputs.url });`,
@@ -902,7 +904,9 @@ test("input resolution: pinned port.value wins over upstream edge", async () => 
   );
   await engine.start();
   const out = engine.getState().nodeOutputs.dst as Record<string, unknown>;
-  assert.equal(out.got, "https://pinned.example");
+  // Depuis 87e14e1, port.value est traité comme un port.default : un lien
+  // entrant l'emporte. Seule la config utilisateur passe avant le lien.
+  assert.equal(out.got, "https://from-edge.example");
   h.cleanup();
 });
 
@@ -1195,5 +1199,32 @@ test("join in a chat loop waits for every forward branch", async () => {
   assert.equal(h.calls.synthSawSources, "SOURCES(organigramme)", "synth ran before search finished");
   assert.equal(r.content, "ANSWER:organigramme | SOURCES(organigramme)");
 
+  h.cleanup();
+});
+
+test("input resolution: legacy node.data.config fills a port without default", async () => {
+  const h = makeHarness({
+    A: `module.exports = async (inputs) => ({ got: inputs.url });`,
+  });
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "A",
+      nodes: [
+        {
+          id: "A",
+          data: {
+            moduleId: "A",
+            config: { url: "https://from-config.example" },
+            ports: { inputs: [{ id: "url", label: "URL", type: "text" }] },
+          },
+        },
+      ],
+      edges: [],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "res-config-fallback" } },
+  );
+  await engine.start();
+  const out = engine.getState().nodeOutputs.A as Record<string, unknown>;
+  assert.equal(out.got, "https://from-config.example");
   h.cleanup();
 });
