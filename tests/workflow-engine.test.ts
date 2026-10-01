@@ -1146,3 +1146,54 @@ test("array port aggregation: array source is flattened, not nested", async () =
   }
   h.cleanup();
 });
+
+// -----------------------------------------------------------------------------
+// Join inside a chat loop: chat → search → synth ← chat, synth → llm → chat.
+// The llm → chat edge closes a cycle. Only that edge is a back edge: synth
+// must wait for search (a forward edge) even though, through the loop, search
+// is reachable from synth. Before the fix, every join downstream of the chat
+// widget ran without its slower branch (agent expert CCI, 2026-10-01).
+// -----------------------------------------------------------------------------
+
+test("join in a chat loop waits for every forward branch", async () => {
+  const h = makeHarness({
+    chat: `module.exports = async (i) => ({ prompt: i.prompt, message: i.message });`,
+    search: `module.exports = async (i) => {
+      await new Promise((r) => setTimeout(r, 30));
+      __calls.search = (__calls.search || 0) + 1;
+      return { sources: "SOURCES(" + i.query + ")" };
+    };`,
+    synth: `module.exports = async (i) => {
+      __calls.synthSawSources = i.sources ?? null;
+      return { prompt: i.question + " | " + i.sources };
+    };`,
+    llm: `module.exports = async (i) => ({ response: "ANSWER:" + i.prompt });`,
+  });
+
+  const engine = new WorkflowEngine(
+    {
+      entrypoint: "chat",
+      nodes: [
+        { id: "chat", data: { moduleId: "chat" } },
+        { id: "search", data: { moduleId: "search" } },
+        { id: "synth", data: { moduleId: "synth" } },
+        { id: "llm", data: { moduleId: "llm" } },
+      ],
+      edges: [
+        { source: "chat", sourceHandle: "prompt", target: "search", targetHandle: "query" },
+        { source: "chat", sourceHandle: "prompt", target: "synth", targetHandle: "question" },
+        { source: "search", sourceHandle: "sources", target: "synth", targetHandle: "sources" },
+        { source: "synth", sourceHandle: "prompt", target: "llm", targetHandle: "prompt" },
+        { source: "llm", sourceHandle: "response", target: "chat", targetHandle: "message" },
+      ],
+    },
+    { modulesDir: h.modulesDir, manifest: { name: "t-join-loop" } },
+  );
+
+  const r = await engine.start("chat", { prompt: "organigramme" });
+  assert.equal(h.calls.search, 1);
+  assert.equal(h.calls.synthSawSources, "SOURCES(organigramme)", "synth ran before search finished");
+  assert.equal(r.content, "ANSWER:organigramme | SOURCES(organigramme)");
+
+  h.cleanup();
+});

@@ -50,6 +50,44 @@ function descendantsOf(startId, adjacency) {
     return visited;
 }
 /** BFS: is targetId reachable from sourceId in adjacency? Detects back-edges. */
+const edgeKey = (source, target) => `${source}\u0000${target}`;
+/**
+ * Classe les liens du graphe depuis les nœuds de départ (parcours en
+ * profondeur itératif) : un lien vers un nœud encore sur la pile est un lien
+ * de retour, c'est-à-dire celui qui ferme une boucle (llm → chat). Renvoie
+ * aussi l'ensemble des nœuds atteignables depuis le départ.
+ */
+function classifyEdges(starts, adjacency) {
+    const backEdges = new Set();
+    const onStack = new Set();
+    const done = new Set();
+    for (const start of starts) {
+        if (done.has(start))
+            continue;
+        const stack = [{ id: start, next: 0 }];
+        onStack.add(start);
+        while (stack.length > 0) {
+            const frame = stack[stack.length - 1];
+            const edges = adjacency.get(frame.id) ?? [];
+            if (frame.next < edges.length) {
+                const { target } = edges[frame.next++];
+                if (onStack.has(target)) {
+                    backEdges.add(edgeKey(frame.id, target));
+                }
+                else if (!done.has(target)) {
+                    onStack.add(target);
+                    stack.push({ id: target, next: 0 });
+                }
+            }
+            else {
+                onStack.delete(frame.id);
+                done.add(frame.id);
+                stack.pop();
+            }
+        }
+    }
+    return { backEdges, reachableFromStart: done };
+}
 function isReachable(sourceId, targetId, adjacency) {
     const visited = new Set();
     const queue = [sourceId];
@@ -813,6 +851,12 @@ export class WorkflowEngine {
         const executionOrder = [];
         const isAllowed = (id) => allowedNodes === null || allowedNodes.has(id);
         let readyQueue = params.initialReady.filter((id) => isAllowed(id));
+        // Vrais liens de retour, classés une fois par un parcours en profondeur
+        // depuis les nœuds de départ. Avant, un lien entrant était ignoré dès que
+        // sa source était atteignable depuis sa cible : avec la boucle du chat
+        // (llm → chat), tout nœud en aval du chat atteint tous les autres, donc
+        // aucune jonction n'attendait sa branche la plus lente.
+        const { backEdges, reachableFromStart } = classifyEdges(params.initialReady, adjacency);
         while (readyQueue.length > 0) {
             const batch = readyQueue;
             const batchResults = await Promise.all(batch.map(async (nodeId) => {
@@ -895,7 +939,14 @@ export class WorkflowEngine {
                         return true;
                     if (executed.has(e.source))
                         return true;
-                    return isReachable(nodeId, e.source, adjacency);
+                    if (backEdges.has(edgeKey(e.source, nodeId)))
+                        return true;
+                    // Source jamais atteinte depuis le départ : elle ne s'exécutera pas
+                    // dans ce run. On garde l'ancienne règle pour ne pas bloquer.
+                    if (!reachableFromStart.has(e.source)) {
+                        return isReachable(nodeId, e.source, adjacency);
+                    }
+                    return false;
                 });
                 const hasAnyExecutedPred = incoming.some((e) => executed.has(e.source));
                 if (allResolved && hasAnyExecutedPred)
